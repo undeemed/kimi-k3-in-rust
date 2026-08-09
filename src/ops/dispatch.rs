@@ -361,7 +361,7 @@ mod avx2 {
     /// `b0..b3`. k3_ops.c:1300-1312.
     #[target_feature(enable = "avx2,fma")]
     pub fn dot_mxfp4(packed: &[u8], scales: &[u8], x: &[f32], input: usize, group: usize) -> f64 {
-        let ngrp = (input + group - 1) / group;
+        let ngrp = input.div_ceil(group);
         let gbyte = group / 2;
         let mut acc = 0.0f64;
         for g in 0..ngrp {
@@ -370,7 +370,7 @@ mod avx2 {
                 continue;
             }
             let n = core::cmp::min(input - g * group, group);
-            let pb = &packed[g * gbyte..g * gbyte + (n + 1) / 2];
+            let pb = &packed[g * gbyte..g * gbyte + n.div_ceil(2)];
             let xg = &x[g * group..g * group + n];
             let wf = expand_group(pb, n);
 
