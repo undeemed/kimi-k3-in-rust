@@ -56,10 +56,33 @@ userdata() {  # runs as root on first boot, no SSH needed
 #!/usr/bin/env bash
 exec > >(tee -a /var/log/kimi-bench.log) 2>&1
 set -x
+
+# Guaranteed end, whatever happens. Without this a box that fails early, or wedges on a
+# stalled download, runs until someone remembers it. 8 hours covers the worst case of a
+# 1.56 TB pull plus the run.
+shutdown -h +480 "kimi-bench backstop" &
+
+# Shut down on the way out, success or failure. Instance-initiated shutdown is set to STOP,
+# not terminate, which is what makes this safe to do on failure too: a stopped instance
+# keeps its root volume and its console log, so /tmp/result.csv and the full log are still
+# readable afterwards, and it bills only ~40 GB of gp3. Terminating would have destroyed
+# the very output this run exists to produce.
+trap 'echo "EXIT status \$? - stopping instance"; shutdown -h now' EXIT
+
 apt-get update -qq && apt-get install -y -qq git curl
 cd /root
 git clone -q $RUST_REPO rust-port
-DEV=\$(lsblk -dn -o NAME,TYPE | awk '\$2=="disk" && \$1 ~ /nvme/ {print "/dev/"\$1}' | tail -1)
+
+# Pick the instance store by SIZE, never by enumeration order. Nitro does not guarantee
+# that the local NVMe is nvme1n1, so \`tail -1\` can hand back the 40 GB EBS root, and
+# then this either refuses to format and dies at first boot or, worse, formats the root.
+# The instance store is 1.87 TB or 2.5 TB against a 40 GB root, so largest-wins is
+# unambiguous.
+DEV=\$(lsblk -dbn -o NAME,SIZE,TYPE | awk '\$3=="disk"{print \$2, \$1}' | sort -rn | head -1 | awk '{print "/dev/"\$2}')
+ROOT=\$(lsblk -no PKNAME "\$(findmnt -no SOURCE /)")
+echo "chose \$DEV, root is on /dev/\$ROOT"
+[ "\$DEV" = "/dev/\$ROOT" ] && { echo "REFUSING: largest disk is the root device"; exit 1; }
+
 bash rust-port/tools/rent_and_run.sh "\$DEV"
 echo "BENCH COMPLETE"
 cat /tmp/result.csv
@@ -83,7 +106,7 @@ launch)
         id=$("${A[@]}" ec2 run-instances \
             --image-id "$(ami_for "$arch")" \
             --instance-type "$(inst_for "$arch")" \
-            --instance-initiated-shutdown-behavior terminate \
+            --instance-initiated-shutdown-behavior stop \
             --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=40,VolumeType=gp3,DeleteOnTermination=true}' \
             --user-data "$(userdata)" \
             --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$TAG-$arch},{Key=Project,Value=$TAG}]" \
@@ -92,27 +115,42 @@ launch)
     done
     echo
     echo "Each box downloads 1.56 TB then runs. Budget 4-6 hours."
-    echo "Poll with: PROFILE=$PROFILE bash tools/launch_pair.sh status"
+    echo "Each STOPS itself when done, or after 8 hours whatever happens. A stopped box"
+    echo "keeps /tmp/result.csv and its console log and bills only its 40 GB root volume."
+    echo "Poll with:  PROFILE=$PROFILE bash tools/launch_pair.sh status"
+    echo "Clean up:   PROFILE=$PROFILE bash tools/launch_pair.sh kill"
     ;;
 status)
+    # `stopped` matters as much as `running`: a box that finished has stopped itself, and
+    # filtering it out would report success as "nothing there".
+    LIVE="pending,running,stopping,stopped"
     "${A[@]}" ec2 describe-instances \
-        --filters "Name=tag:Project,Values=$TAG" "Name=instance-state-name,Values=pending,running" \
+        --filters "Name=tag:Project,Values=$TAG" "Name=instance-state-name,Values=$LIVE" \
         --query 'Reservations[].Instances[].[InstanceId,InstanceType,Architecture,State.Name,PublicIpAddress]' \
         --output table
-    say "last lines of each console log"
+    say "result line, or the tail of the log if it is not done"
     for id in $("${A[@]}" ec2 describe-instances --filters "Name=tag:Project,Values=$TAG" \
-                 "Name=instance-state-name,Values=running" \
+                 "Name=instance-state-name,Values=$LIVE" \
                  --query 'Reservations[].Instances[].InstanceId' --output text); do
         echo "--- $id"
-        "${A[@]}" ec2 get-console-output --instance-id "$id" --output text \
-            | tail -15 || echo "  (console not published yet)"
+        log=$("${A[@]}" ec2 get-console-output --instance-id "$id" --output text 2>/dev/null || true)
+        if [ -z "$log" ]; then
+            echo "  (console not published yet, first boot takes a few minutes)"
+        elif printf '%s' "$log" | grep -q 'BENCH COMPLETE'; then
+            printf '%s' "$log" | sed -n '/instance,arch,vcpu/,$p' | head -3
+        else
+            printf '%s' "$log" | tail -12
+        fi
     done
+    echo
+    echo "A stopped box still holds /tmp/result.csv on its root volume."
+    echo "Done with them:  PROFILE=$PROFILE bash $0 kill"
     ;;
 kill)
     ids=$("${A[@]}" ec2 describe-instances --filters "Name=tag:Project,Values=$TAG" \
-           "Name=instance-state-name,Values=pending,running" \
+           "Name=instance-state-name,Values=pending,running,stopping,stopped" \
            --query 'Reservations[].Instances[].InstanceId' --output text)
-    [ -z "$ids" ] && { echo "nothing running"; exit 0; }
+    [ -z "$ids" ] && { echo "nothing to terminate"; exit 0; }
     echo "terminating: $ids"
     "${A[@]}" ec2 terminate-instances --instance-ids $ids --query 'TerminatingInstances[].InstanceId' --output text
     ;;
