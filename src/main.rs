@@ -36,15 +36,17 @@ use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::Instant;
 
 const VERSION: &str = "1.0.0";
 const SPEC_MAX: usize = 8;
+static START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 // ----------------------------------------------------------- host introspection ----
 
 fn now_s() -> f64 {
-    Instant::now().elapsed().as_secs_f64()
+    START.elapsed().as_secs_f64()
 }
 
 fn human(b: f64) -> String {
@@ -2217,4 +2219,17 @@ fn run() -> i32 {
 
 fn main() {
     std::process::exit(run());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::now_s;
+    use std::time::Duration;
+
+    #[test]
+    fn monotonic_timer_advances() {
+        let before = now_s();
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(now_s() > before);
+    }
 }

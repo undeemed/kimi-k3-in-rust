@@ -1199,9 +1199,14 @@ fn bf16f(h: u16) -> f32 {
     f32::from_bits((h as u32) << 16)
 }
 
-/// Format a C-style `%d` name at the given layer.
+/// Format a C-style `%d` layer name, fully qualified.
+///
+/// C spells every layer template as `PRE "layers.%d..."`, concatenating the prefix into
+/// the literal at each of its 39 call sites (k3_bind.c:170). Prefixing here keeps the 39
+/// Rust templates readable while producing byte-identical names; dropping it made the
+/// binder look up `layers.0.input_layernorm.weight`, which no released checkpoint holds.
 fn fmt_name(template: &str, layer: usize) -> String {
-    template.replace("%d", &layer.to_string())
+    format!("{PRE}{}", template.replace("%d", &layer.to_string()))
 }
 
 /// Reinterpret a byte slice as f32. SAFETY: `off` is 4-byte aligned within the buffer
