@@ -76,6 +76,13 @@ It uses no BLAS, framework, or GPU.
 - On real weights this port decodes 1.54x to 1.62x faster per token than the C build, on aarch64; expect parity on x86-64.
 - CI checks Linux x86-64, macOS arm64, Clippy, formatting, and C-to-Rust bit identity.
 
+> **Want the whole 93 layers?** That needs the full checkpoint on disk, 1,561 GB plus a
+> 109 GB packed trunk, which is a storage bill rather than a memory one. The engine itself
+> still runs in 8 GB of RAM. [`tools/rent_and_run.sh`](tools/rent_and_run.sh) does the whole
+> thing on a rented box: clones both engines, pulls the checkpoint, builds, packs the trunk,
+> then runs C and Rust at the same 8 GB ceiling and byte-compares. Sized for an
+> `im4gn.xlarge` (arm64, 1,875 GB NVMe, about $0.36/hour).
+
 > **Scope of the real-checkpoint run:** 3 of the 96 shards were downloaded, which is
 > layers 0 and 1 plus the embedding and head, 24 GB rather than 1.56 TB. That is a real
 > `--layers 2` stack on real bf16 weights and real MXFP4 experts, not the whole 93-layer
