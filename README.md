@@ -4,14 +4,17 @@
 
 <h3>A Rust port of <a href="https://github.com/FareedKhan-dev/kimi-k3-in-c">kimi-k3-in-c</a></h3>
 
-<p>Kimi K3, 2.78 trillion parameters, on one CPU.<br>Byte-identical output to the C original, verified on the same machine.</p>
+<p><b>CPU inference for a 2.78 trillion parameter mixture-of-experts LLM, in pure Rust.</b><br>
+No GPU, no BLAS, no PyTorch, no ONNX. Four dependencies. Streams the checkpoint from disk,
+for the same 8 GB memory floor as the C original.<br>
+Byte-identical output to the C original, verified on the same machine.</p>
 
 <p>
 <a href="../../actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/undeemed/kimi-k3-in-rust/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License"></a>
 <a href="Cargo.toml"><img src="https://img.shields.io/badge/Rust-1.83+-orange?style=flat-square" alt="Rust"></a>
 <a href="#platforms"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20x86--64%20%7C%20arm64-lightgrey?style=flat-square" alt="Platform"></a>
-<a href="#tests"><img src="https://img.shields.io/badge/tests-43%20passed%20%7C%202%20gated-brightgreen?style=flat-square" alt="Tests"></a>
+<a href="#tests"><img src="https://img.shields.io/badge/tests-46%20passed%20%7C%202%20gated-brightgreen?style=flat-square" alt="Tests"></a>
 <a href="#1-byte-identical-logits"><img src="https://img.shields.io/badge/logits%20vs%20C-byte--identical-success?style=flat-square" alt="Bit identity"></a>
 </p>
 
@@ -67,6 +70,13 @@ The engine's whole value is a numerical exactness contract - the same tokens at 
 224 GB - so the port is judged by one question: does it produce the same bits? On this
 machine it does, and [that is measured rather than asserted](#1-byte-identical-logits).
 
+**What has not been done here: nobody has run this against the released 1.56 TB
+checkpoint.** That is a disk problem, not a memory one, and there was no copy on the machine
+this was built on. Everything below is measured against the tiny model, synthetic models,
+and the C build - never the real weights. The two tests that would exercise the real
+checkpoint ship gated on `K3_SHARD_DIR`, and [finding 4](#things-the-port-turned-up) is what
+that gap already cost once.
+
 <a id="platforms"></a>
 Platforms: Linux and macOS, x86-64 and arm64. O_DIRECT on Linux, `F_NOCACHE` on macOS,
 buffered reads elsewhere. Windows compiles and runs through the buffered path.
@@ -81,7 +91,7 @@ GATE 2  greedy decode   : 20/20 generated tokens match full_ids
 GATE 3  incremental    : 20/20 generated tokens match full_ids
 VERDICT: ENGINE MATCHES THE REFERENCE EXACTLY
 ...
-test result: ok. 43 passed; 0 failed; 2 ignored
+test result: ok. 46 passed; 0 failed; 2 ignored
 ```
 
 Three seconds, no weights, no network, no Python. The two ignored tests need the released
@@ -579,7 +589,7 @@ the unicode tables formatted one entry per line. None of it is abstraction.
 ## Development
 
 ```bash
-cargo test --release       # 43 tests, no weights, no network, no Python
+cargo test --release       # 46 tests, no weights, no network, no Python
 cargo bench                # the kernel benchmark, same shapes as the C one
 cargo clippy --all-targets -- -D warnings    # zero warnings is the gate
 cargo fmt
