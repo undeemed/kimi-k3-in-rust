@@ -4,9 +4,18 @@
 # Clones both engines, pulls the whole 1.56 TB checkpoint, builds both, packs the trunk,
 # then runs C and Rust at the same 8 GB memory ceiling and byte-compares their output.
 #
-# TARGET: im4gn.xlarge (4 vCPU, 16 GiB, 1,875 GB NVMe, arm64) or anything with >= 1.75 TB
-# of local disk. arm64 is deliberate: the port's measured advantage is a NEON result, and
-# on x86-64 both projects hand-write their intrinsics to the same instruction mix.
+# RUN THIS ON TWO BOXES, ONE PER ARCHITECTURE, BOTH BINARIES ON EACH:
+#   im4gn.xlarge   arm64   4 vCPU, 16 GiB, 1,875 GB NVMe, ~$0.36/hr
+#                          tests whether the measured 1.6x holds on the full 93 layers
+#   i3en.xlarge    x86-64  4 vCPU, 32 GiB, 2,500 GB NVMe, ~$0.45/hr
+#                          tests the prediction that x86-64 comes out at parity
+#
+# DO NOT split the two engines across two boxes. The reference's own data: the same code
+# on two devices differed 2.2x (31.71 against 70.62 s/token) with nothing in the source to
+# explain it, and one identical configuration measured twice pulled 2,709 against 5,874
+# MB/s off the disk on byte-for-byte identical work. That is a 2.17x device spread against
+# a 1.6x effect, so a cross-machine comparison measures the storage. Both engines run here,
+# on one device, back to back.
 #
 # DISK IS THE BINDING CONSTRAINT AND THE MARGIN IS THIN:
 #   checkpoint          1,561 GB
@@ -31,6 +40,31 @@ JOBS="${JOBS:-8}"            # parallel shard downloads
 NEED_GB=1750
 
 say() { printf '\n=== %s ===\n' "$*"; }
+ncpu() { nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1; }
+
+# ------------------------------------------------------------ what this box tests ----
+ARCH=$(uname -m)
+case "$ARCH" in
+    aarch64|arm64)
+        EXPECT="Rust ahead. The gap lives in matmul_bf16, which the reference left to the
+  autovectoriser and the port hand-wrote in NEON. Two layers measured 1.54-1.62x."
+        ;;
+    x86_64)
+        EXPECT="parity. Both projects hand-write AVX2 here and the instruction mix is
+  identical, 4, 4 and 2 vfmadd*pd per kernel. A large gap either way is a finding."
+        ;;
+    *)  EXPECT="unknown for $ARCH: neither project hand-writes intrinsics for it, so both
+  fall back to their compiler's autovectoriser." ;;
+esac
+
+say "this box is $ARCH, $(ncpu) vCPU"
+echo "Both engines will run here, on this one device, back to back."
+echo "Expected: $EXPECT"
+echo
+echo "Not reproduced here: the reference's 32.69 s/token floor came from 124 cores, and"
+echo "roughly 43% of a token at that configuration is arithmetic. Fewer cores will be"
+echo "slower by an amount this script cannot predict. What transfers is the 8 GB ceiling,"
+echo "the byte-identical output, and the C-against-Rust ratio on ONE device."
 
 # ---------------------------------------------------------------- disk ----
 say "formatting $DEV without reserved blocks"
@@ -91,7 +125,7 @@ echo "checkpoint: $(du -sh "$MODEL" | cut -f1)"
 
 # ---------------------------------------------------------------- build ----
 say "building both engines"
-make -C kimi-k3-in-c bin/k3 -j"$(nproc)" >/dev/null
+make -C kimi-k3-in-c bin/k3 -j"$(ncpu)" >/dev/null
 ( cd kimi-k3-in-rust && cargo build --release --quiet )
 ls -l kimi-k3-in-c/bin/k3 kimi-k3-in-rust/target/release/k3 | awk '{print $NF, $5, "bytes"}'
 
@@ -113,23 +147,41 @@ ARGS=(--ids "$IDS" --gen 8 --trunk "$TRUNK" --trunk-gb 2.5 --cache-gb 0.5 --incr
 
 run_capped() {  # name binary outfile logitsfile threads_env
     systemd-run --scope -q -p MemoryMax=8G -p MemorySwapMax=0 \
-        env "$5=$(nproc)" "$2" "$MODEL" "${ARGS[@]}" \
+        env "$5=$(ncpu)" "$2" "$MODEL" "${ARGS[@]}" \
         --dump-logits "$4" --out "$3" 2>&1 | tail -30
 }
 run_capped C    kimi-k3-in-c/bin/k3                 /tmp/c.json    /tmp/c.bin    OMP_NUM_THREADS
 run_capped Rust kimi-k3-in-rust/target/release/k3   /tmp/rust.json /tmp/rust.bin RAYON_NUM_THREADS
 
 # ---------------------------------------------------------------- verdict ----
-say "verdict"
-python3 - <<'PY'
-import json
+# One CSV line per box, so the two runs merge without retyping anything.
+say "verdict on $ARCH"
+if cmp -s /tmp/c.bin /tmp/rust.bin; then LOGITS=identical; else LOGITS=DIFFER; fi
+INSTANCE=$(curl -s --max-time 2 http://169.254.169.254/latest/meta-data/instance-type || echo "$ARCH-box")
+ARCH="$ARCH" INSTANCE="$INSTANCE" LOGITS="$LOGITS" EXPECT="$EXPECT" NPROC="$(ncpu)" python3 - <<'PY'
+import json, os
 c = json.load(open('/tmp/c.json')); r = json.load(open('/tmp/rust.json'))
-print('C    ids:', c['generated_ids'])
-print('Rust ids:', r['generated_ids'])
-print('tokens:', 'IDENTICAL' if c['generated_ids'] == r['generated_ids'] else 'MISMATCH')
-print(f"C    {c['seconds_per_token']:.2f} s/token")
-print(f"Rust {r['seconds_per_token']:.2f} s/token")
-if r['seconds_per_token']:
-    print(f"speedup {c['seconds_per_token'] / r['seconds_per_token']:.2f}x")
+cs, rs = c['seconds_per_token'], r['seconds_per_token']
+same = c['generated_ids'] == r['generated_ids']
+
+print(f"  arch          {os.environ['ARCH']} on {os.environ['INSTANCE']}, {os.environ['NPROC']} vCPU")
+nl = c['layers']
+print(f"  layers        {nl}" + (" (full model)" if nl == 93 else f" of 93  <- PARTIAL"))
+print(f"  tokens        {'IDENTICAL' if same else 'MISMATCH  <- STOP, the engines diverged'}")
+print(f"  logits        {os.environ['LOGITS']}")
+print(f"  C             {cs:8.2f} s/token")
+print(f"  Rust          {rs:8.2f} s/token")
+if rs:
+    print(f"  speedup       {cs / rs:8.2f}x")
+print(f"\n  expected: {os.environ['EXPECT']}")
+
+# The line to paste back. Correctness first: a speed number from diverged engines is junk.
+line = (f"{os.environ['INSTANCE']},{os.environ['ARCH']},{os.environ['NPROC']},"
+        f"{c['layers']},{cs:.4f},{rs:.4f},{cs / rs if rs else 0:.4f},"
+        f"{'yes' if same else 'NO'},{os.environ['LOGITS']}")
+hdr = "instance,arch,vcpu,layers,c_s_per_token,rust_s_per_token,speedup,tokens_match,logits"
+print(f"\n  paste this back:\n  {hdr}\n  {line}")
+open('/tmp/result.csv', 'w').write(hdr + "\n" + line + "\n")
 PY
-cmp /tmp/c.bin /tmp/rust.bin && echo "logits BYTE-IDENTICAL (163,840 f32)" || echo "logits DIFFER"
+echo
+echo "also saved to /tmp/result.csv"

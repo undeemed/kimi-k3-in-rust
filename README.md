@@ -81,7 +81,11 @@ It uses no BLAS, framework, or GPU.
 > still runs in 8 GB of RAM. [`tools/rent_and_run.sh`](tools/rent_and_run.sh) does the whole
 > thing on a rented box: clones both engines, pulls the checkpoint, builds, packs the trunk,
 > then runs C and Rust at the same 8 GB ceiling and byte-compares. Sized for an
-> `im4gn.xlarge` (arm64, 1,875 GB NVMe, about $0.36/hour).
+> `im4gn.xlarge` (arm64, 1,875 GB NVMe, about $0.36/hour). Run it on one arm64 box and
+> one x86-64 box, both engines on each: arm64 tests whether the 1.6x holds on the full
+> model, x86-64 tests the parity prediction. Splitting the two engines across two boxes
+> would measure the storage instead, since the reference records a 2.2x device spread
+> against a 1.6x effect.
 
 > **Scope of the real-checkpoint run:** 3 of the 96 shards were downloaded, which is
 > layers 0 and 1 plus the embedding and head, 24 GB rather than 1.56 TB. That is a real
