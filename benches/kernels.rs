@@ -33,15 +33,28 @@ use k3::ops::{matmul_bf16, matmul_mxfp4};
 /// It doubles as the consumer of every measured loop's result, so nothing measured here
 /// can be optimised away.
 fn fnv(label: &str, v: &[f32]) -> u64 {
-    let mut h: u64 = 14695981039346656037;
+    // Two hashes are printed. The first uses the real FNV-1a 64-bit offset basis,
+    // 14695981039346656037. The second uses 1469598103934665603, which is the constant
+    // bench_kernels.c actually carries: the FNV basis with its last digit dropped. That
+    // makes it not FNV-1a, but it is what the reference prints, so it is the only value a
+    // cross-build diff can be run against. Both are emitted because the point of the hash
+    // is comparability, not hash pedigree.
+    const FNV_BASIS: u64 = 14695981039346656037;
+    const REF_BASIS: u64 = 1469598103934665603;
+    let mut h = FNV_BASIS;
+    let mut hr = REF_BASIS;
     for &f in v {
         let u = f.to_bits();
         for t in 0..4 {
-            h ^= ((u >> (8 * t)) & 0xFF) as u64;
+            let byte = ((u >> (8 * t)) & 0xFF) as u64;
+            h ^= byte;
             h = h.wrapping_mul(1099511628211);
+            hr ^= byte;
+            hr = hr.wrapping_mul(1099511628211);
         }
     }
     println!("             {label} OUTPUT FNV1a = {h:016x}");
+    println!("             {label} same bytes, reference basis = {hr:016x}");
     h
 }
 
