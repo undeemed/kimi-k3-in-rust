@@ -49,6 +49,7 @@ The default build is portable; use `RUSTFLAGS="-C target-cpu=native" cargo build
 
 ## Pick what you need
 
+- **Read the story first:** [What happened building this](#what-happened-building-this)
 - **Run the model:** [Running it](#running-it)
 - **See proof that Rust matches C:** [How we know it is the same engine](#how-we-know-it-is-the-same-engine)
 - **See performance numbers:** [C against Rust, measured](#c-against-rust-measured)
@@ -85,6 +86,50 @@ It uses no BLAS, framework, or GPU.
 Platforms: Linux and macOS, x86-64 and arm64.
 Linux uses `O_DIRECT`, macOS uses `F_NOCACHE`, and other platforms use buffered reads.
 Windows compiles and runs through the buffered path.
+
+## What happened building this
+
+The short version, in the order it happened. Everything here is expanded further down,
+including inside the collapsed blocks.
+
+1. **The port is byte-identical to the C build.** Not close: all 163,840 logits of the
+   released model match to the byte, and so do the tiny-model oracle's 256.
+   [Evidence](#how-we-know-it-is-the-same-engine).
+
+2. **Then the C original turned out not to load the checkpoint on macOS at all.**
+   `pread()` there rejects any request `>= 2 GiB` with `EINVAL` rather than returning
+   short. Measured: 2,147,483,647 bytes succeeds, 2,147,483,648 fails. `embed_tokens` is
+   `163840 x 7168` at bf16, 2,348,810,240 bytes, so the load dies at offset 0.
+
+3. **Linux hides it.** There the same call caps at `0x7ffff000` and returns short, so the
+   existing loop absorbs it, and every published run of the original is on Linux. The port
+   is immune because `read_at` clamps before the syscall. One line to fix; it is not my
+   repo, so it ships as [a patch](docs/patches/) (finding 6).
+
+4. **I shipped a worse bug than that one.** C splices the `language_model.model.` prefix
+   into 39 separate string literals. This port hoisted it into one helper and then did not
+   apply it, so the binder asked for `layers.0.input_layernorm.weight` and bound **zero
+   layers of the real model** (finding 4).
+
+5. **Every test passed anyway, because the suite is weightless by design.** The C
+   project's own `make test` ends by printing `ALL WEIGHTLESS TESTS PASSED`. The
+   full-model oracle builds its own weight store from fixture names and never calls the
+   binder; the only two tests that would have caught it are gated on a 1.56 TB download.
+   A name bug had nothing standing under it.
+
+6. **Fixed, with an ungated test under it now.**
+   [`tests/bind_names.rs`](tests/bind_names.rs) drives the real planner against a shard set
+   holding no layer tensors and asserts the name it asks for. Then the real weights turned
+   out to be reachable after all: the shards hold one layer each, so 3 of 96, 24 GB rather
+   than 1.56 TB, is enough for a real two-layer stack.
+
+7. **On those real weights it decodes 1.54x to 1.62x faster than C.** That is an aarch64
+   number and the caveat matters: the gap is entirely the bf16 unpack, where the original
+   left aarch64 to the autovectoriser and this port hand-wrote NEON. On x86-64 both
+   hand-write intrinsics and the instruction mix is identical, so expect parity.
+   [Numbers](#c-against-rust-measured).
+
+12,709 lines of Rust, four dependencies, a 1.16 MB binary.
 
 ## Running it
 
