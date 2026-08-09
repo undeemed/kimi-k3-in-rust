@@ -1,0 +1,16 @@
+flowchart LR
+    OPS["op fixtures<br/>tolerances from MANIFEST"] --> EX["exact equality<br/>bf16 = f32, all 3 paths"]
+    EX --> OR["tiny-model oracle<br/>same weights as the C build"]
+    OR --> G1["GATE 1 teacher forcing<br/>32/32 and 20/20"]
+    OR --> G2["GATE 2 greedy decode<br/>20/20"]
+    OR --> G3["GATE 3 incremental<br/>KV + KDA state, 20/20"]
+    G1 --> CMP["final-position logits<br/>1024 bytes, byte for byte<br/>equal to the C binary"]
+    G2 --> CMP
+    G3 --> CMP
+    style OPS fill:#ECE8E0,stroke:#8C8477,color:#3B372F
+    style EX fill:#E4ECF3,stroke:#5C7C9B,color:#3B372F
+    style OR fill:#EAE4F1,stroke:#7E6E9C,color:#3B372F
+    style G1 fill:#F2E9D4,stroke:#C0913E,color:#3B372F
+    style G2 fill:#F4E7D3,stroke:#C07A42,color:#3B372F
+    style G3 fill:#DDEBE7,stroke:#4E8E86,color:#3B372F
+    style CMP fill:#E7ECDD,stroke:#6E9160,color:#3B372F
