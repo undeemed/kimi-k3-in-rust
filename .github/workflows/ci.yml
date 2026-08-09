@@ -51,6 +51,17 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
 
+  # Every performance number in the README is also in a CSV under docs/data/, and the
+  # figures are rendered from those CSVs. This has drifted before: a speedup was quoted as
+  # 1.15x when the underlying seconds give 1.144x, because the ratio was taken from the
+  # rounded columns. Cheap to check, and it fails on a claim rather than on a build.
+  docs:
+    name: README matches docs/data
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/check_docs.py
+
   # The port claims bit-identical output to the C original. This rebuilds the C reference at
   # the pinned commit, runs both tiny-model oracles, and byte-compares the final-position
   # logits. If this job goes red the exactness contract is broken, which is the one failure

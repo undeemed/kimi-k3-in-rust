@@ -72,7 +72,7 @@ It uses no BLAS, framework, or GPU.
 - 48 tests pass, including the two that need the released checkpoint.
 - Tiny-model logits are byte-identical to the C build on the same machine.
 - **Released-checkpoint logits are byte-identical too**: all 163,840, on real weights.
-- On real weights Rust runs 1.54x to 1.62x faster per token than the C build.
+- On real weights this port decodes 1.54x to 1.62x faster per token than the C build, on aarch64; expect parity on x86-64.
 - CI checks Linux x86-64, macOS arm64, Clippy, formatting, and C-to-Rust bit identity.
 
 > **Scope of the real-checkpoint run:** 3 of the 96 shards were downloaded, which is
@@ -455,11 +455,15 @@ Both builds on one machine (Apple M5, 10 cores), at their real settings: C with
 `opt-level = 3`, thin LTO and rayon. Thread count pinned per run with `OMP_NUM_THREADS` and
 `RAYON_NUM_THREADS`.
 
-**Read the result first:** on the released checkpoint Rust is **1.54x to 1.62x** faster per
-token, steady across thread counts. On a synthetic f32-only model it measures 1.14x to
-1.38x, and the gap between those two numbers is itself the finding - see
-[why the synthetic number was low](#why-the-synthetic-number-was-low). Neither figure
-projects onto the full 93-layer model, where storage dominates.
+**Read the result first:** on the released checkpoint this port decodes **1.54x to 1.62x**
+faster per token than the C build, steady across thread counts. Two scope limits travel
+with that number and should never be dropped from it: it is an **aarch64** result, because
+it comes from a kernel the original left to the autovectoriser and this port hand-wrote
+(on x86-64 both hand-write intrinsics and the instruction mix is identical, so expect
+parity), and it is **two layers of 93**, so it does not project onto a full token, where
+storage dominates. On a synthetic f32-only model the same harness measures only 1.14x to
+1.38x, and that gap is itself a finding - see
+[why the synthetic number was low](#why-the-synthetic-number-was-low).
 
 ### The released checkpoint
 
@@ -603,15 +607,22 @@ The whole difference is getting bf16 values into registers. From the C source's 
 inserts fed by a deinterleaving `ld2.2s`; the hand-written NEON does one `shll.4s` per four
 elements off a plain `ldp`.
 
-**This is not "Rust is faster than C."** It is that the original hand-wrote AVX2 and left
-aarch64 to the autovectoriser, which picked a poor unpack on one kernel. The same intrinsics
-in C would close it. What the measurement does establish is that the port carries no
-overhead on the hot path - identical arithmetic, and the one divergence traceable to a single
-instruction-selection choice.
+**The speedup is real, and it is this port's.** On this machine, on real weights, tokens
+come out 1.54x to 1.62x faster, and that traces to this kernel. The real trunk is bf16, so
+`matmul_bf16` runs on every layer; it is diluted to 1.6x from the kernel's 2x because the
+KDA recurrence, the router and the expert dequantisation are code where the two builds
+agree instruction for instruction. The synthetic run cannot show any of it, because it
+holds [no bf16 at all](#why-the-synthetic-number-was-low).
 
-The engine-level 1.14-1.38x above is the same effect, diluted: bf16 matmul is a large share
-of the trunk but not all of a token, and the rest - the KDA recurrence, the router, the
-expert dequantisation - is code where the two builds agree instruction for instruction.
+**What earned it was doing the aarch64 work, not choosing Rust.** The original hand-wrote
+AVX2 and left aarch64 to the autovectoriser, which picked a poor unpack on this one kernel.
+This port hand-wrote the NEON. The same intrinsics in C would close the gap, and nothing
+here says otherwise.
+
+That has a consequence worth stating before anyone quotes 1.6x at you: **on x86-64 both
+projects hand-write their intrinsics, the instruction mix is identical** (4, 4 and 2
+`vfmadd*pd`, see [codegen parity](#4-codegen-parity)), **so expect parity there, not 1.6x.**
+The measured advantage is an aarch64 result. It has not been measured end to end on x86-64.
 
 ---
 
