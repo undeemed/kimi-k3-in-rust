@@ -1,1 +1,6 @@
 /target
+
+# Written by the checkpoint-gated tests (K3_SHARD_DIR), for tools/verify_*.py
+real_layer.json
+expert_trace.bin
+expert_hist.json

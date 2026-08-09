@@ -5,105 +5,85 @@
 <h3>A Rust port of <a href="https://github.com/FareedKhan-dev/kimi-k3-in-c">kimi-k3-in-c</a></h3>
 
 <p><b>CPU inference for a 2.78 trillion parameter mixture-of-experts LLM, in pure Rust.</b><br>
-No GPU, no BLAS, no PyTorch, no ONNX. Four dependencies. Streams the checkpoint from disk,
-for the same 8 GB memory floor as the C original.<br>
-Byte-identical output to the C original, verified on the same machine.</p>
+No GPU, BLAS, PyTorch, or ONNX.
+Four dependencies.
+Same 8 GB memory floor as the C original.</p>
 
 <p>
 <a href="../../actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/undeemed/kimi-k3-in-rust/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License"></a>
 <a href="Cargo.toml"><img src="https://img.shields.io/badge/Rust-1.83+-orange?style=flat-square" alt="Rust"></a>
 <a href="#platforms"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20x86--64%20%7C%20arm64-lightgrey?style=flat-square" alt="Platform"></a>
-<a href="#tests"><img src="https://img.shields.io/badge/tests-46%20passed%20%7C%202%20gated-brightgreen?style=flat-square" alt="Tests"></a>
+<a href="#tests"><img src="https://img.shields.io/badge/tests-48%20passed-brightgreen?style=flat-square" alt="Tests"></a>
 <a href="#1-byte-identical-logits"><img src="https://img.shields.io/badge/logits%20vs%20C-byte--identical-success?style=flat-square" alt="Bit identity"></a>
 </p>
 
 </div>
 
-> ### Read the original first
->
-> **[FareedKhan-dev/kimi-k3-in-c](https://github.com/FareedKhan-dev/kimi-k3-in-c)** is where this
-> engine comes from, and its README is the explanation: why a 2.78T model fits in 8 GB, what
-> MXFP4 buys, how KDA and MLA and the attention-residual stack work, why the trunk streams,
-> how the expert cache is sized, and the four reductions that take 5.56 TB down to a dial.
-> All of that is unchanged here and is not repeated below.
->
-> **This README covers only what is different in the Rust port.**
+## Start here
 
----
+**Run the proof:**
 
-## Contents
+```bash
+cargo test --release
+```
 
-- [What this is](#what-this-is)
-- [Quick start](#quick-start)
-- [Running it](#running-it)
-- [What is different](#what-is-different)
-  - [1. The numeric core carries explicit NEON and AVX2](#1-the-numeric-core-carries-explicit-neon-and-avx2)
-  - [2. Scratch disjointness is enforced, not documented](#2-scratch-disjointness-is-enforced-not-documented)
-  - [3. Tagged pointers became types](#3-tagged-pointers-became-types)
-  - [4. The expert source is a trait, passed as an argument](#4-the-expert-source-is-a-trait-passed-as-an-argument)
-  - [5. serde_json replaces the hand-written scanner](#5-serde_json-replaces-the-hand-written-scanner)
-  - [6. rayon replaces OpenMP](#6-rayon-replaces-openmp)
-  - [7. Errors are values, and aborts stay aborts](#7-errors-are-values-and-aborts-stay-aborts)
-  - [8. Where the unsafe is](#8-where-the-unsafe-is)
-  - [9. What is deliberately identical](#9-what-is-deliberately-identical)
-  - [10. What is not ported](#10-what-is-not-ported)
-- [How we know it is the same engine](#how-we-know-it-is-the-same-engine)
-- [C against Rust, measured](#c-against-rust-measured)
-  - [The whole engine](#the-whole-engine)
-  - [The two hot kernels](#the-two-hot-kernels)
-- [Things the port turned up](#things-the-port-turned-up)
-- [Size and shape](#size-and-shape)
-- [Development](#development)
-- [License and attribution](#license-and-attribution)
+**Expected ending:**
+
+```text
+VERDICT: ENGINE MATCHES THE REFERENCE EXACTLY
+test result: ok. 46 passed; 0 failed; 2 ignored
+```
+
+This takes about three seconds on an Apple M5.
+It needs no model weights, network access, or Python.
+
+**Build the binary:**
+
+```bash
+cargo build --release
+```
+
+The binary is `target/release/k3`.
+The default build is portable; use `RUSTFLAGS="-C target-cpu=native" cargo build --release` to optimize for the current CPU.
+
+## Pick what you need
+
+- **Run the model:** [Running it](#running-it)
+- **See proof that Rust matches C:** [How we know it is the same engine](#how-we-know-it-is-the-same-engine)
+- **See performance numbers:** [C against Rust, measured](#c-against-rust-measured)
+- **Read porting details:** [What is different](#what-is-different)
+
+> **Read the original for the model architecture.**
+> [FareedKhan-dev/kimi-k3-in-c](https://github.com/FareedKhan-dev/kimi-k3-in-c) explains how the 2.78T model fits in 8 GB, MXFP4, KDA, MLA, trunk streaming, and expert caching.
+> This README covers the Rust port.
 
 ---
 
 ## What this is
 
-A statement-for-statement port of the C99 engine at commit
-[`ff11dce`](https://github.com/FareedKhan-dev/kimi-k3-in-c/commit/ff11dce858a2eb8a781224facdffd33a1fa48d25),
-including the CLI, the test suite and the benchmark. Four dependencies: `libc`, `rayon`,
-`serde`, `serde_json`. No BLAS, no framework, no GPU.
+A statement-for-statement port of the C99 engine at commit [`ff11dce`](https://github.com/FareedKhan-dev/kimi-k3-in-c/commit/ff11dce858a2eb8a781224facdffd33a1fa48d25), including its CLI, tests, and benchmark.
 
-The engine's whole value is a numerical exactness contract - the same tokens at 8 GB and at
-224 GB - so the port is judged by one question: does it produce the same bits? On this
-machine it does, and [that is measured rather than asserted](#1-byte-identical-logits).
+It uses four dependencies: `libc`, `rayon`, `serde`, and `serde_json`.
+It uses no BLAS, framework, or GPU.
 
-**What has not been done here: nobody has run this against the released 1.56 TB
-checkpoint.** That is a disk problem, not a memory one, and there was no copy on the machine
-this was built on. Everything below is measured against the tiny model, synthetic models,
-and the C build - never the real weights. The two tests that would exercise the real
-checkpoint ship gated on `K3_SHARD_DIR`, and [finding 4](#things-the-port-turned-up) is what
-that gap already cost once.
+**Current proof:**
+
+- 48 tests pass, including the two that need the released checkpoint.
+- Tiny-model logits are byte-identical to the C build on the same machine.
+- **Released-checkpoint logits are byte-identical too**: all 163,840, on real weights.
+- CI checks Linux x86-64, macOS arm64, Clippy, formatting, and C-to-Rust bit identity.
+
+> **Scope of the real-checkpoint run:** 3 of the 96 shards were downloaded, which is
+> layers 0 and 1 plus the embedding and head, 24 GB rather than 1.56 TB. That is a real
+> `--layers 2` stack on real bf16 weights and real MXFP4 experts, not the whole 93-layer
+> model. Everything else here comes from the tiny model, synthetic models, and direct
+> comparison with the C build. Point `K3_SHARD_DIR` at a shard set to reproduce.
 
 <a id="platforms"></a>
-Platforms: Linux and macOS, x86-64 and arm64. O_DIRECT on Linux, `F_NOCACHE` on macOS,
-buffered reads elsewhere. Windows compiles and runs through the buffered path.
-
-## Quick start
-
-```console
-$ cargo test --release
-...
-GATE 1  teacher forcing : 32/32 positions match tf_pred
-GATE 2  greedy decode   : 20/20 generated tokens match full_ids
-GATE 3  incremental    : 20/20 generated tokens match full_ids
-VERDICT: ENGINE MATCHES THE REFERENCE EXACTLY
-...
-test result: ok. 46 passed; 0 failed; 2 ignored
-```
-
-Three seconds, no weights, no network, no Python. The two ignored tests need the released
-1.56 TB checkpoint; enable them with `K3_SHARD_DIR`.
-
-```bash
-cargo build --release        # target/release/k3
-```
-
-`[profile.release]` is `opt-level = 3` with `lto = "thin"`. There is no `target-cpu=native`
-in the checked-in config, matching the original's `make portable` default. Opt in with
-`RUSTFLAGS="-C target-cpu=native"`.
+Platforms: Linux and macOS, x86-64 and arm64.
+Linux uses `O_DIRECT`, macOS uses `F_NOCACHE`, and other platforms use buffered reads.
+Windows compiles and runs through the buffered path.
 
 ## Running it
 
@@ -140,6 +120,12 @@ the original.
 ---
 
 ## What is different
+
+Skip this section if you only want to build or run the engine.
+
+<details>
+<summary><strong>Show 10 implementation differences</strong></summary>
+
 
 ### 1. The numeric core carries explicit NEON and AVX2
 
@@ -322,6 +308,8 @@ Not "similar" - identical, and tested:
 - Scope limits are unchanged and are the original's: no chat template, greedy only, no
   chunked prefill, no vision tower, no quality benchmark.
 
+</details>
+
 ---
 
 ## How we know it is the same engine
@@ -334,6 +322,16 @@ Not "similar" - identical, and tested:
 reference's `tests/fixtures/` - `diff -rq` between the two trees is clean - so the oracle
 targets are the same integers, not merely equivalent ones. Each C test binary has one Rust
 counterpart, and the same two are gated on a real checkpoint in both projects:
+
+**Proof at a glance:**
+
+1. The tiny-model logits are byte-identical to the C build: 256 f32 values and 1,024 matching bytes.
+2. Teacher forcing, greedy decode, and incremental decode match every expected token.
+3. The kernel fixtures preserve the original reduction order, cast points, and tolerances.
+
+<details>
+<summary><strong>Show exact verification evidence</strong></summary>
+
 
 ```text
 C `make test`      Rust `cargo test`   fixture
@@ -374,6 +372,39 @@ IDENTICAL
 256 f32, 1024 bytes, no difference. The C side needed a two-line patch to dump the vector;
 that patch is not committed to the original.
 
+#### On the released checkpoint
+
+The tiny model is 256 logits wide. The real one is 163,840, and the same comparison holds
+there, on real bf16 trunk weights and real MXFP4 experts streamed from actual shards:
+
+```console
+$ A="~/k3model --ids 1,2,3,4,5,6,7,8 --gen 3 --layers 2 --incremental --cache-gb 1"
+
+$ ./target/release/k3 $A --dump-logits /tmp/real_rust.bin --out /tmp/real_rust.json
+config: ~/k3model/config.json (nested shape) | hidden=7168 layers=93 vocab=163840
+        | 24 MLA + 69 KDA | experts 896 top16 shared2 | latent=3584
+bound 2/2 layers                       3 tokens in 3.7 s, 1.25 s/token
+
+$ ../kimi-k3-in-c/bin/k3 $A --dump-logits /tmp/real_c.bin --out /tmp/real_c.json
+bound 2/2 layers                       3 tokens in 3.7 s, 1.22 s/token
+
+$ cmp /tmp/real_c.bin /tmp/real_rust.bin && echo IDENTICAL
+IDENTICAL
+```
+
+163,840 f32, 655,360 bytes, no difference, and the same three token ids
+(`8736, 152366, 136640`). The two checkpoint-gated tests agree just as exactly: their
+`real_layer.json` outputs are byte-identical at 1,549,270 bytes, as are their
+`expert_trace.bin` cache traces, and both report `max |y| = 0.084896`.
+
+`tests/expert.rs` also confirms the MXFP4 geometry against the real thing rather than a
+fixture: all 896 routed experts of layer 1 are contiguous, each exactly 17,547,264 bytes,
+`33,030,144` parameters at `0.531250` bytes per parameter, which is what MXFP4 predicts to
+the digit. The fused matmul and dequantise-then-multiply agree at `0.000e0`.
+
+This is a 2-layer stack, not all 93. See the scope note in
+[What this is](#what-this-is).
+
 ### 2. The three oracle gates
 
 13 layers, hidden 128, vocab 256, 628 tensors. Thirteen is not arbitrary: at the tiny
@@ -412,6 +443,8 @@ total          20    20
 scalar fmadd    3     3
 ```
 
+</details>
+
 ---
 
 ## C against Rust, measured
@@ -420,6 +453,9 @@ Both builds on one machine (Apple M5, 10 cores), at their real settings: C with
 `clang -O3 -mcpu=native -ffp-contract=off` and OpenMP through libomp, Rust with
 `opt-level = 3`, thin LTO and rayon. Thread count pinned per run with `OMP_NUM_THREADS` and
 `RAYON_NUM_THREADS`. Every number is a median of five runs.
+
+**Read the result first:** Rust measures 1.14x to 1.38x faster on synthetic end-to-end decode on this Apple M5.
+Do not project that ratio directly onto the released checkpoint, where storage dominates.
 
 ### The whole engine
 
@@ -532,7 +568,12 @@ expert dequantisation - is code where the two builds agree instruction for instr
 
 ## Things the port turned up
 
-Findings worth passing back upstream:
+**Six findings are grouped below.**
+The fixed items remain documented as failure notes for future ports.
+
+<details>
+<summary><strong>Show all six findings</strong></summary>
+
 
 1. **`bench_kernels.c` uses a truncated FNV offset basis.** It carries
    `1469598103934665603`; the FNV-1a 64-bit basis is `14695981039346656037`, one digit
@@ -564,6 +605,21 @@ Findings worth passing back upstream:
 5. **`now_s()` measured nothing.** It returned `Instant::now().elapsed()`, which is the time
    taken to read the clock, so every duration the CLI printed was zero. The C original takes
    `clock_gettime(CLOCK_MONOTONIC)` deltas against a start captured earlier.
+6. **The C original cannot load the released checkpoint on macOS.** `k3_st_read` passes the
+   whole tensor to one `pread` and loops on a short return. macOS does not return short for
+   an oversized request; it rejects it outright with `EINVAL` for any size `>= 2^31`.
+   Measured here on the real shard: `pread` of 2,147,483,647 bytes succeeds, 2,147,483,648
+   fails. `embed_tokens` and `lm_head` are `163840 x 7168` at bf16, which is 2,348,810,240
+   bytes each, so the first call fails at offset 0 and the load aborts with
+   `k3_st: short read on language_model.model.embed_tokens.weight at +0`. Every published
+   run of the original is on Linux, where the same call caps at `0x7ffff000` and returns
+   short, so the loop absorbs it and the bug never shows. The port is unaffected because
+   `pread_full` goes through `FileExt::read_at`, which clamps the request before the
+   syscall. Capping each request at `0x7ffff000` in the C reader fixes it in one line; that
+   patch was applied locally to get the comparison above and is not committed upstream.
+
+
+</details>
 
 ---
 
@@ -588,24 +644,18 @@ the unicode tables formatted one entry per line. None of it is abstraction.
 
 ## Development
 
-```bash
-cargo test --release       # 46 tests, no weights, no network, no Python
-cargo bench                # the kernel benchmark, same shapes as the C one
-cargo clippy --all-targets -- -D warnings    # zero warnings is the gate
-cargo fmt
-K3_SHARD_DIR=/path cargo test --release -- --ignored   # the two checkpoint-gated tests
-```
+| Goal | Command |
+|---|---|
+| Verify behavior | `cargo test --release` |
+| Check formatting | `cargo fmt --check` |
+| Check lint | `cargo clippy --all-targets -- -D warnings` |
+| Run benchmarks | `cargo bench` |
+| Test real weights | `K3_SHARD_DIR=/path cargo test --release -- --ignored` |
 
-[CI](.github/workflows/ci.yml) runs three jobs on every push. The weightless suite on
-ubuntu x86-64 and macOS arm64, so both dispatch paths get exercised. `fmt` and
-`clippy -D warnings`. And a **bit-identity job** that clones the C reference at the pinned
-commit, builds it, runs both tiny-model oracles and byte-compares the logits - so the
-exactness claim in this README is checked by machine on every commit rather than asserted
-once.
+[CI](.github/workflows/ci.yml) runs the weightless suite on Ubuntu x86-64 and macOS arm64, checks formatting and Clippy, then clones the pinned C reference and byte-compares both tiny-model logits.
 
-[`docs/images/`](docs/images/) holds the figure set with the Python and Mermaid generators
-that produce it, and its README separates the figures measured here from the ones inherited
-from the original.
+[`docs/images/`](docs/images/) contains the figures and their Python or Mermaid generators.
+Its README separates measurements made here from figures inherited from the original.
 
 ## License and attribution
 
