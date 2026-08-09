@@ -139,6 +139,24 @@ def _load_e2e():
 E2E_THREADS, E2E_S = _load_e2e()
 
 
+# The released checkpoint, layers 0-1, from docs/data/real-checkpoint.csv. This one
+# streams MXFP4 experts off disk on a machine whose page cache cannot hold the shards,
+# so the median carries I/O stalls and the MINIMUM is the compute comparison.
+def _load_real():
+    rows = {}
+    with open(OUT.parent / "data" / "real-checkpoint.csv") as f:
+        for r in csv.DictReader(f):
+            rows[(r["lang"], int(r["threads"]))] = (
+                float(r["s_per_token_min"]),
+                float(r["s_per_token_median"]),
+            )
+    threads = sorted({t for _, t in rows})
+    return threads, rows
+
+
+REAL_THREADS, REAL_S = _load_real()
+
+
 def binary_sizes():
     """LOLLIPOP. cargo build --release on this machine, then ls -l on what it
     produced: the engine first, then the nine test binaries that gate it."""
@@ -184,6 +202,93 @@ def binary_sizes():
         va="top",
     )
     save(fig, "binary_sizes")
+
+
+def real_checkpoint():
+    """GROUPED BARS + SPEEDUP, on the released weights. Minimum rather than median:
+    this workload streams experts from disk on a box whose page cache cannot hold the
+    shards, so medians measure the storage and the minimum measures the code."""
+    fig, (ax, ax2) = plt.subplots(
+        1, 2, figsize=(10.8, 4.1), gridspec_kw={"width_ratios": [1.55, 1]}
+    )
+    xs = np.arange(len(REAL_THREADS), dtype=float)
+    c = np.array([REAL_S[("C", t)][0] for t in REAL_THREADS])
+    r = np.array([REAL_S[("Rust", t)][0] for t in REAL_THREADS])
+    cm = np.array([REAL_S[("C", t)][1] for t in REAL_THREADS])
+    rm = np.array([REAL_S[("Rust", t)][1] for t in REAL_THREADS])
+
+    ax.bar(xs - 0.19, c, width=0.34, color=GRAY, edgecolor="white", label="C")
+    ax.bar(xs + 0.19, r, width=0.34, color=GREEN, edgecolor="white", label="Rust")
+    # The median sits above each bar as a thin cap, so the I/O spread stays visible
+    # rather than being quietly dropped.
+    ax.plot(
+        xs - 0.19,
+        cm,
+        "_",
+        color=INK,
+        markersize=13,
+        markeredgewidth=1.6,
+        label="median (carries I/O stalls)",
+    )
+    ax.plot(xs + 0.19, rm, "_", color=INK, markersize=13, markeredgewidth=1.6)
+    # Label above whichever is higher, the bar or its median cap, so the two never collide.
+    for x, v, m in zip(xs - 0.19, c, cm):
+        ax.text(x, max(v, m) + 0.025, f"{v:.2f}", ha="center", fontsize=9.5, color=MUTE)
+    for x, v, m in zip(xs + 0.19, r, rm):
+        ax.text(
+            x,
+            max(v, m) + 0.025,
+            f"{v:.2f}",
+            ha="center",
+            fontsize=9.5,
+            color=INK,
+            fontweight="bold",
+        )
+    ax.set_xticks(xs)
+    ax.set_xticklabels(
+        [f"{t} thread" if t == 1 else f"{t} threads" for t in REAL_THREADS]
+    )
+    ax.set_ylim(0, max(cm.max(), rm.max()) * 1.12)
+    ax.legend(frameon=False, fontsize=8.5, loc="upper right")
+    style(ax, "Seconds per token, released weights", None, "seconds per token")
+
+    ax2.axhline(1.0, color="#9ca3af", linewidth=1.2, linestyle="--", zorder=1)
+    ax2.text(xs[-1] + 0.45, 1.02, "parity", fontsize=9, color=MUTE, ha="right")
+    sp = c / r
+    ax2.bar(xs, sp, width=0.5, color=GREEN, edgecolor="white", zorder=2)
+    for x, v in zip(xs, sp):
+        ax2.text(
+            x,
+            v + 0.015,
+            f"{v:.2f}x",
+            ha="center",
+            fontsize=10,
+            color=INK,
+            fontweight="bold",
+        )
+    ax2.set_xticks(xs)
+    ax2.set_xticklabels([str(t) for t in REAL_THREADS])
+    ax2.set_ylim(0.9, max(sp) * 1.10)
+    style(ax2, "Rust speedup over C", "threads")
+
+    fig.suptitle(
+        "The released Kimi K3 checkpoint: real bf16 trunk, real MXFP4 experts",
+        fontsize=13,
+        color=INK,
+        fontweight="bold",
+        y=1.04,
+    )
+    fig.text(
+        0.5,
+        -0.09,
+        "Layers 0 and 1 of 93, 8 tokens, prefill excluded, 7 runs. Bars are the minimum "
+        "and the caps the median:\nthe shards do not fit in page cache, so medians "
+        "measure the disk. Identical token ids in every run.",
+        ha="center",
+        fontsize=9.5,
+        color=MUTE,
+    )
+    save(fig, "real_checkpoint")
 
 
 def end_to_end():
@@ -522,6 +627,7 @@ def port_loc():
 
 FNS = [
     binary_sizes,
+    real_checkpoint,
     port_loc,
     end_to_end,
     rust_vs_c_kernels,

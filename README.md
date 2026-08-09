@@ -72,6 +72,7 @@ It uses no BLAS, framework, or GPU.
 - 48 tests pass, including the two that need the released checkpoint.
 - Tiny-model logits are byte-identical to the C build on the same machine.
 - **Released-checkpoint logits are byte-identical too**: all 163,840, on real weights.
+- On real weights Rust runs 1.54x to 1.62x faster per token than the C build.
 - CI checks Linux x86-64, macOS arm64, Clippy, formatting, and C-to-Rust bit identity.
 
 > **Scope of the real-checkpoint run:** 3 of the 96 shards were downloaded, which is
@@ -452,22 +453,69 @@ scalar fmadd    3     3
 Both builds on one machine (Apple M5, 10 cores), at their real settings: C with
 `clang -O3 -mcpu=native -ffp-contract=off` and OpenMP through libomp, Rust with
 `opt-level = 3`, thin LTO and rayon. Thread count pinned per run with `OMP_NUM_THREADS` and
-`RAYON_NUM_THREADS`. Every number is a median of five runs.
+`RAYON_NUM_THREADS`.
 
-**Read the result first:** Rust measures 1.14x to 1.38x faster on synthetic end-to-end decode on this Apple M5.
-Do not project that ratio directly onto the released checkpoint, where storage dominates.
+**Read the result first:** on the released checkpoint Rust is **1.54x to 1.62x** faster per
+token, steady across thread counts. On a synthetic f32-only model it measures 1.14x to
+1.38x, and the gap between those two numbers is itself the finding - see
+[why the synthetic number was low](#why-the-synthetic-number-was-low). Neither figure
+projects onto the full 93-layer model, where storage dominates.
 
-### The whole engine
+### The released checkpoint
+
+Layers 0 and 1 of 93, on real bf16 trunk weights and real MXFP4 experts streamed off disk.
+Three of the 96 shards, 24 GB. Both binaries read the same shards and emit identical token
+ids, checked before any timing.
+
+![Seconds per token on the released checkpoint, C against Rust](docs/images/real_checkpoint.png)
+
+```text
+threads      C s/tok    Rust s/tok    speedup        (minimum of 7 runs)
+      1       0.8271        0.5203      1.59x
+      2       0.4693        0.2994      1.57x
+      4       0.3025        0.1967      1.54x
+     10       0.2320        0.1430      1.62x
+```
+
+**These are minima, not medians, and the distinction is not cosmetic.** The shard set is
+24 GB on a 24 GB machine, so the page cache cannot hold it and every run does real disk
+reads. That puts long stalls in the distribution: Rust's one-thread median is 1.24 s
+against a 0.52 s floor, and a median-of-medians briefly reported Rust *losing* at four
+threads on the strength of a single bad run. The minimum is the run least disturbed by
+storage, which is the one that compares the code. The medians are drawn on the chart as
+caps so the spread stays visible. Raw data:
+[`docs/data/real-checkpoint.csv`](docs/data/real-checkpoint.csv).
+
+<a id="why-the-synthetic-number-was-low"></a>
+#### Why the synthetic number was low
+
+The synthetic model below reports 1.14x to 1.38x, and it is not measuring the same thing.
+A dtype census explains the whole difference:
+
+```text
+                    tensors
+synthetic model     340 F32, 576 U8      <- no bf16 at all
+real shard          17 BF16, 6 F32       per layer
+```
+
+`tools/gen_bench_model.py` writes every non-expert tensor as F32, so the synthetic run
+never executes `matmul_bf16` - the one kernel where the two builds diverge, and where
+[the unpack](#the-two-hot-kernels) makes Rust about 2x. The synthetic benchmark was
+therefore timing the kernels on which both languages emit identical instructions, which is
+why it also narrowed toward parity as threads went up. It is kept below because it is fully
+reproducible without a 24 GB download, but the released-checkpoint figure is the real one.
+
+### The synthetic model
 
 Two matmuls are not an engine. This runs the complete decode loop - the KDA recurrence,
 gated MLA with a KV cache, the attention-residual stack, the router, MXFP4 experts streamed
 through the LRU cache - and times the part a user waits on.
 
-The released checkpoint is 1.56 TB, which is a disk problem rather than a memory one and is
-not available here. So the measurement runs a synthetic checkpoint with the same layer mix
-and the same kernel shapes at hidden size 2048: 13 layers, 9 KDA, 4 MLA, one dense, twelve
-MoE, eight routed experts each. Weights are random, because what is being compared is
-arithmetic throughput and not model quality.
+Downloading all 96 shards was not practical, so this measurement runs a synthetic
+checkpoint with the same layer mix and the same kernel shapes at hidden size 2048: 13
+layers, 9 KDA, 4 MLA, one dense, twelve MoE, eight routed experts each. Weights are random,
+because what is being compared is arithmetic throughput and not model quality. Every
+non-expert tensor is F32, which is the limitation described above.
 
 **Both binaries read the same bytes and emit identical token ids**, which the harness
 asserts before reporting any timing. Per-step seconds come from the engine's own STEP table,
@@ -484,26 +532,27 @@ threads      C s/tok    Rust s/tok    speedup
      10       0.0550        0.0480      1.14x
 ```
 
-The gap narrows with thread count because both builds hit the same memory wall; by four
-threads neither is arithmetic-bound. Raw data:
+The gap narrows with thread count here, unlike on real weights, because with no bf16 in
+play both builds run the same instructions and just hit the same memory wall. Raw data:
 [`docs/data/end-to-end.csv`](docs/data/end-to-end.csv). Reproduce with
 `tools/gen_bench_model.py` then `tools/bench_end_to_end.py`.
 
-**Do not carry this ratio over to the released checkpoint.** Everything above is resident in
-RAM. The real engine is not: it is 93 layers at hidden 7168 streamed from disk, and the
-reference's own 12-rung ladder puts 40.9-60.6% of wall clock in storage waits
+**Neither ratio carries over to the full 93-layer model.** Both measurements above hold the
+weights close: the synthetic one is resident in RAM, and the real one touches two layers.
+The full model streams 93 layers at hidden 7168 from disk, and the reference's own 12-rung
+ladder puts 40.9-60.6% of wall clock in storage waits
 ([`memory-ladder.tsv`](https://github.com/FareedKhan-dev/kimi-k3-in-c/blob/main/docs/data/memory-ladder.tsv)).
-No language touches that half. Amdahl on the arithmetic half only:
+No language touches that half. Amdahl on the arithmetic half, at the measured 1.54-1.62x:
 
 ```text
-I/O share of a real token    1.38x arithmetic    1.14x arithmetic
-                    40.9%               1.19x               1.08x
-                    60.6%               1.12x               1.05x
+I/O share of a real token    1.62x arithmetic    1.54x arithmetic
+                    40.9%               1.29x               1.26x
+                    60.6%               1.18x               1.16x
 ```
 
-So the defensible claim is narrow: **the port does not pay for its safety on the hot path,
-and is somewhat ahead of the C build on arithmetic.** On the real model that would land
-nearer 1.05-1.19x, and the disk would still be the thing to fix first.
+So the defensible claim: **the port does not pay for its safety on the hot path, and is
+about 1.6x ahead of the C build on real weights at these widths.** Across a whole 93-layer
+token that would land nearer 1.16-1.29x, and the disk would still be the thing to fix first.
 
 Peak RSS is at parity - 2.02 GB against 2.01 GB on this model, measured the same run.
 

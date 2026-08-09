@@ -27,6 +27,31 @@ cd ../kimi-k3-in-rust && cargo build --release --benches
 RAYON_NUM_THREADS=10 ./target/release/deps/kernels-*
 ```
 
+## `real-checkpoint.csv`
+
+The released weights, behind `docs/images/real_checkpoint.png`. Layers 0 and 1 of 93, on
+the real bf16 trunk and real MXFP4 experts, from 3 of the 96 shards (24 GB). 8 tokens,
+prefill excluded, 7 runs per configuration after one discarded warm run. Both binaries
+read the same shards and emitted identical token ids in every run.
+
+**Two columns, and the minimum is the one to read.** The shard set is 24 GB on a 24 GB
+machine, so the page cache cannot hold it and every run does real disk reads. That leaves
+long stalls in the distribution: Rust's one-thread median is 1.24 s against a 0.52 s
+floor, and an earlier median-of-medians briefly showed Rust losing at four threads purely
+on one bad run. `s_per_token_min` is the run least disturbed by storage and is the code
+comparison; `s_per_token_median` is kept so the spread is not hidden.
+
+To reproduce, fetch the three shards named in the README, then:
+
+```sh
+A="$HOME/k3model --ids 1,2,3,4,5,6,7,8 --gen 8 --layers 2 --incremental --cache-gb 1"
+OMP_NUM_THREADS=10   ../../../kimi-k3-in-c/bin/k3 $A --out /tmp/c.json
+RAYON_NUM_THREADS=10 ./target/release/k3        $A --out /tmp/rust.json
+```
+
+The C build needs [`docs/patches/c-macos-pread-cap.patch`](../patches/) first on macOS,
+or it cannot read a tensor over 2 GiB at all.
+
 ## `end-to-end.csv`
 
 The whole-engine sweep behind `docs/images/end_to_end.png`: per-token seconds for the

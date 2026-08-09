@@ -1,0 +1,56 @@
+diff --git a/src/io/k3_st.c b/src/io/k3_st.c
+index 2be9165..6a7ada1 100644
+--- a/src/io/k3_st.c
++++ b/src/io/k3_st.c
+@@ -361,6 +361,15 @@ static int cmp_str(const void *a, const void *b)
+     return strcmp(*(const char *const *)a, *(const char *const *)b);
+ }
+ 
++/* LOCAL PATCH, not upstream. macOS pread() rejects any request >= 2^31 with EINVAL
++ * rather than returning short, so a 2.35 GB tensor (embed_tokens, lm_head at
++ * vocab 163840 x hidden 7168 x bf16) fails at offset 0 and the checkpoint cannot be
++ * loaded at all. Cap every request; every pread here already sits in a loop that
++ * handles a short return. Applied only to compare against the Rust port on real
++ * weights on this machine. */
++#define K3_PREAD_CAP ((size_t)0x7ffff000)
++static size_t k3_cap_(int64_t n) { return (size_t)n > K3_PREAD_CAP ? K3_PREAD_CAP : (size_t)n; }
++
+ int k3_st_open(K3St *s, const char *dir)
+ {
+     memset(s, 0, sizeof *s);
+@@ -466,7 +475,7 @@ int64_t k3_st_read_aligned(const K3St *s, int shard, int64_t off, int64_t nbytes
+         int64_t got = 0;
+         while (got < nbytes) {
+             ssize_t r = pread(s->fd[shard], (char *)buf + got,
+-                              (size_t)(nbytes - got), (off_t)(off + got));
++                              k3_cap_(nbytes - got), (off_t)(off + got));
+             if (r <= 0) return got;
+             got += r;
+         }
+@@ -483,7 +492,7 @@ int64_t k3_st_read_aligned(const K3St *s, int shard, int64_t off, int64_t nbytes
+ 
+     int64_t got = 0;
+     while (got < len) {
+-        ssize_t r = pread(dfd, (char *)buf + got, (size_t)(len - got), (off_t)(lo + got));
++        ssize_t r = pread(dfd, (char *)buf + got, k3_cap_(len - got), (off_t)(lo + got));
+         if (r <= 0) {
+             /* The final window of a shard can extend past EOF, which is a short read
+              * rather than an error. Accept it once the payload itself is covered. */
+@@ -501,7 +510,7 @@ int64_t k3_st_read(const K3St *s, const K3Tensor *t, void *buf)
+     int64_t got = 0;
+     while (got < t->nbytes) {
+         ssize_t r = pread(s->fd[t->shard], (char *)buf + got,
+-                          (size_t)(t->nbytes - got), (off_t)(t->off + got));
++                          k3_cap_(t->nbytes - got), (off_t)(t->off + got));
+         if (r <= 0) {
+             fprintf(stderr, "k3_st: short read on %s at +%lld\n", t->name, (long long)got);
+             return got;
+@@ -540,7 +549,7 @@ int64_t k3_st_read_f32(const K3St *s, const K3Tensor *t, float *out)
+         const int64_t want = take * esz;
+         int64_t got = 0;
+         while (got < want) {
+-            ssize_t r = pread(s->fd[t->shard], (char *)raw + got, (size_t)(want - got),
++            ssize_t r = pread(s->fd[t->shard], (char *)raw + got, k3_cap_(want - got),
+                               (off_t)(t->off + done * esz + got));
+             if (r <= 0) {
+                 fprintf(stderr, "k3_st: short read widening %s at element %lld\n",

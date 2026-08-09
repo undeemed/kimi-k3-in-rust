@@ -1,6 +1,6 @@
 # Figures
 
-Eight figures, all of them about **this port**. Every number in them was measured on one
+Nine figures, all of them about **this port**. Every number in them was measured on one
 machine: an Apple M5 with 10 cores running macOS, rustc 1.97.1, `cargo build --release`,
 no `target-cpu=native`. The C side of any comparison was built on the same machine with
 `clang -O3 -mcpu=native -ffp-contract=off` and OpenMP through libomp, with thread counts
@@ -8,6 +8,7 @@ pinned per run via `OMP_NUM_THREADS` and `RAYON_NUM_THREADS`.
 
 | figure | what it shows |
 | --- | --- |
+| `real_checkpoint.png` | seconds per token on the released checkpoint, C against Rust, minimum and median |
 | `end_to_end.png` | seconds per token for the whole engine, C against Rust, at one two four and ten threads |
 | `rust_vs_c_kernels.png` | per-kernel speedup against a parity line, at one core and at ten |
 | `perf_kernel_scaling.png` | throughput against thread count, four series |
@@ -17,7 +18,7 @@ pinned per run via `OMP_NUM_THREADS` and `RAYON_NUM_THREADS`.
 | `port_loc.png` | lines of Rust per module, largest first |
 | `verification-ladder.png` | fixtures, the three oracle gates, then the byte-for-byte logits compare |
 
-The five performance figures are a fair comparison: both builds threaded, both at their
+The six performance figures are a fair comparison: both builds threaded, both at their
 real optimisation settings, thread count pinned, and the same input bytes producing the
 same output bytes on both sides before any timing was compared. `end_to_end.png` runs the
 complete decode loop rather than two kernels, and asserts identical token ids from both
@@ -28,8 +29,9 @@ exactly on parity, as an identical instruction mix predicts - reads as nothing a
 `perf_bf16_instructions.png` traces the one gap that remains to a specific
 instruction-selection choice in the bf16 unpack.
 
-Raw timings: [`../data/perf-sweep.csv`](../data/perf-sweep.csv) (kernels) and
-[`../data/end-to-end.csv`](../data/end-to-end.csv) (whole engine).
+Raw timings: [`../data/perf-sweep.csv`](../data/perf-sweep.csv) (kernels),
+[`../data/end-to-end.csv`](../data/end-to-end.csv) (synthetic whole engine) and
+[`../data/real-checkpoint.csv`](../data/real-checkpoint.csv) (released weights).
 
 ## Regenerating
 
