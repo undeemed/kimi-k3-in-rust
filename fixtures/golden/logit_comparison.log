@@ -1,0 +1,67 @@
+=== trunk repacked, running C engine ===
+Kimi K3, pure C, real checkpoint
+  shards   : /w/shards
+  prompt   : 5 tokens, generating 1
+
+indexed 497220 tensors from 96 shards in 0.94 s
+trunk on disk : 110.00 GB total (STREAMED from /ephemeral/trunk, not held in RAM)
+
+memory plan
+  trunk (STREAMED) 16.00 GB
+  embed + lm_head  4.70 GB
+  expert cache     6.00 GB
+  recurrent state  626.25 MB
+  buffers          6.02 MB
+  KV cache         0.00 B
+  TOTAL            27.33 GB
+  available        65.78 GB
+
+trunk stream: 108.81 GB packed, 10/93 layers PINNED (13.16 GB), ring 1 x 2.37 GB
+              reads use O_DIRECT (page cache bypassed)
+              deterministic hit rate 10.8% (a cyclic scan defeats LRU, so a pinned prefix is used instead)
+trunk streaming enabled from /ephemeral/trunk in 0.0 s
+embedding, final norm and lm_head: 4.70 GB in 9.7 s
+
+peak RSS after loading weights: 4.78 GB  (the plan above is a forecast, this is measured)
+expert cache: 341 slots x 17.56 MB = 5.99 GB (0.41% of the 1.45 TB expert pool)
+
+recurrent state for 93 layers: 626.25 MB
+
+STEP   TOKEN      SECONDS      CACHE HIT  READ GB    TOK/S
+--------------------------------------------------------------------
+wrote /ephemeral/c_logits.bin (163840 float32 logits)
+0      2494       169.73       35.0       83.91      0.006
+--------------------------------------------------------------------
+1 tokens in 169.7 s, 169.73 s/token average
+PEAK RSS for the whole run: 25.83 GB   <- quote this, not the plan
+
+cache [final step]
+  slots        : 341 of 17.56 MB = 5.99 GB arena (341 resident, 0 pinned)
+  requests     : 7360  hits 2578 (35.03%)  misses 4782  evictions 4441
+  read from disk: 83.91 GB in 71.04 s (1181 MB/s while loading)
+
+wrote /ephemeral/c_run.json
+wrote expert_trace.bin: 7360 requests (57.5 KB)
+I/O share of wall clock: 65.6%  (trunk 40.3 s + experts 71.0 s of 169.7 s)
+  NOTE: the expert figure counts the LAST step only, because cache
+  statistics are reset each step; the trunk figure is cumulative.
+
+trunk [final]
+  pinned 10/93 layers, ring 1 slots
+  binds 93, hits 0 (0.0%), reads 93
+  read 108.81 GB in 40.29 s (2700 MB/s)
+k3_run_exit=0
+
+===== ELEMENTWISE LOGIT COMPARISON =====
+prompt cross-check     : both sides ran [3, 4, 5, 6, 7]
+vocab                 : 163840
+C argmax              : 2494  (logit 15.021946)
+reference argmax      : 2494  (logit 15.021948)
+top-10 overlap        : 10/10
+max |diff|            : 7.867813e-06
+relative to max|ref|  : 5.237545e-07   (budget 5.1e-04)
+mean |diff|           : 1.231738e-06
+correlation           : 1.000000000
+
+VERIFIED: the C engine's logits match the torch reference over the FULL 93-layer stack on the real checkpoint, elementwise, and the argmax token agrees. Composition, the AttnRes aggregator, the final norm and the lm_head are all correct.
+cmp_exit=0

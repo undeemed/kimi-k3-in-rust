@@ -1,0 +1,38 @@
+[package]
+name = "kimi-k3"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.83"
+license = "Apache-2.0"
+description = "Kimi K3 (2.78T MoE) CPU inference engine, a Rust port of kimi-k3-in-c"
+repository = "https://github.com/FareedKhan-dev/kimi-k3-in-c"
+
+[lib]
+name = "k3"
+path = "src/lib.rs"
+
+[[bin]]
+name = "k3"
+path = "src/main.rs"
+
+# test_tok.c's argv contract, so tools/tok_parity.py runs unchanged.
+[[bin]]
+name = "k3-tok-test"
+path = "src/bin/k3_tok_test.rs"
+
+[[bench]]
+name = "kernels"
+path = "benches/kernels.rs"
+harness = false
+
+[dependencies]
+libc = "0.2"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+# No target-cpu=native here: the C build's `make portable` philosophy. Opt in with
+#   RUSTFLAGS="-C target-cpu=native" cargo build --release

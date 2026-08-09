@@ -1,0 +1,287 @@
+=== gates, current source, 2026-07-29T14:43:07Z ===
+gcc: gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
+host: 32 cores, 62 GB RAM
+model: REAL Kimi K3 checkpoint, 96 shards, 497220 tensors, 1.56 TB
+
+### 1. fixture suite (make test) -- tolerances from MANIFEST.json
+Kimi K3 C ops, validated against the pure-torch reference
+fixtures: ../fixtures/ops
+tolerance: atol=1.0e-05 rtol=1.0e-04  (from MANIFEST.json)
+
+  PASS  rmsnorm        n=384    worst=0.01x tol
+  PASS  situ_glu       n=48     worst=0.00x tol
+        bound check |out|=100.000 must be <= b1*b2=100.0 : ok
+  PASS  shortconv      n=320    worst=0.01x tol
+  PASS  conv_state     n=192    worst=0.00x tol
+  PASS  conv_continuation n=64     worst=0.00x tol
+  PASS  kda_decay      H=4 D=16 tok=4  max|dg|=4.768e-07 max|dalpha|=1.788e-07 (drives k3_kda_decay)
+  PASS  kda_recur1_out n=64     worst=0.01x tol
+  PASS  kda_recur1_state n=1024   worst=0.00x tol
+  PASS  kda_recur8_out n=512    worst=0.04x tol
+  PASS  kda_recur8_state n=1024   worst=0.04x tol
+  PASS  router         rows=6    k=2  index sets match, worst weight=0.00x tol
+  PASS  mla            n=768    worst=0.08x tol
+        H=4 qh=32 (nope 24 + rope 8) v=16 kv_lora=32 scale=0.176777
+  PASS  moe            n=384    worst=0.53x tol
+        hidden=128 latent=64 inter=48 experts=8 top2 shared=2
+  PASS  mxfp4          64 rows x 3584 elems, EXACT on released checkpoint bytes
+  PASS  matmul_bf16   n=129    bit-identical to k3_matmul
+  PASS  kda_layer1_out n=128    worst=0.02x tol
+  PASS  kda_layer1_state n=1024   worst=0.01x tol
+  PASS  kda_layer8_out n=1024   worst=0.50x tol
+  PASS  kda_layer8_state n=1024   worst=0.02x tol
+  PASS  layer_kda      n=512    worst=0.58x tol
+        layer 1 (KDA), blocks 2 -> 2, boundary=no
+  PASS  layer_mla      n=512    worst=0.21x tol
+        layer 3 (MLA), blocks 2 -> 3, boundary=YES, prefix_sum cleared
+  PASS  attn_res       n=512    worst=0.02x tol
+
+22 passed, 0 failed, 0 skipped
+exit=0
+
+### 2. oracle gates 1-3 (make oracle) -- exit status now reflects the verdict
+Kimi K3 pure-C engine, full-model oracle gate
+fixtures: ../fixtures
+
+config: hidden=128 layers=13 vocab=256 heads=4/4 experts=8 top2
+layer map (0-based): KKKMKKKMKKKMM   (M=MLA, K=KDA; dense layer = 0)
+attn_res boundaries at: 0 3 6 9 12 
+
+checkpoint: 628 tensors loaded
+prompt_ids 12, full_ids 32, tf_pred 32
+
+all layer weights bound
+
+GATE 1  teacher forcing : 32/32 positions match tf_pred
+        generated span  : 20/20  <- must be exact
+GATE 2  greedy decode   : 20/20 generated tokens match full_ids
+GATE 3  incremental    : 20/20 generated tokens match full_ids  <- KV cache + carried KDA state
+
+VERDICT: ENGINE MATCHES THE REFERENCE EXACTLY
+exit=0
+
+### 3. safetensors reader + widening bit-comparison (make st)
+    F16 64 elems, 0.00 MB in 0.000 s (18 MB/s), min -1.81641 max 2.01562 mean 0.0808117  <-- NON-FINITE VALUES
+  packed.u8.2d
+    U8 224 elems, 0.00 MB in 0.000 s (209 MB/s), min 0 max 255 mean 130.808
+  scalar.f32
+    F32 1 elems, 0.00 MB in 0.000 s (5 MB/s), min 3.5 max 3.5 mean 3.5
+  second.shard.f32
+    F32 100 elems, 0.00 MB in 0.000 s (556 MB/s), min -2.81957 max 2.53693 mean -0.292684
+  wrote st_values.json
+
+READER SELF-CHECKS PASSED (now run tools/verify_st.py for the external check)
+make: ../../.venv/bin/python: No such file or directory
+make: *** [Makefile:75: st] Error 127
+
+### 4. scale test at real dimensions (make scale)
+
+one KDA layer  : 443740384 params  (887.48 MB at bf16)
+69 KDA layers  : 61.24 GB at bf16   (KDA attention ONLY, not the whole trunk)
+full trunk     : 113.49 GB at bf16, 56,743,648,000 always-active params
+                 (measured from the shard headers, not derived here)
+one expert     : 33030144 params  (17.55 MB at MXFP4)
+all 82432 experts: 1.45 TB at MXFP4  <- streamed from NVMe
+
+per-sequence state, FIXED regardless of context:
+  KDA recurrent : 217.06 MB at bf16
+  ShortConv     : 15.26 MB at bf16
+  MLA KV        : 2.37 MB per position (24 MLA layers, EXPANDED k and v, fp32)
+                  19.38 GB at 8192 context
+                  310.04 GB at 131072 context
+
+allocating and running ONE full-width KDA layer (fp32)...
+  weights: 1.77 GB
+  ran 4 tokens in 0.17 s (44 ms/token)
+  output all finite: YES, max |y| = 0.000003
+  state non-zero   : yes
+
+SCALE TEST PASSED
+exit=0
+
+############################################################
+### 5. REAL MODEL, 2.78T params, 96 shards from the volume
+############################################################
+
+--- 5a. streamed, 16 GB trunk + 6 GB cache, full recompute ---
+Kimi K3, pure C, real checkpoint
+  shards   : /w/shards
+  prompt   : 5 tokens, generating 2
+
+indexed 497220 tensors from 96 shards in 0.70 s
+resident trunk: 110.00 GB in RAM (large matrices kept in the checkpoint's bf16,
+  fp32 only for the norms and biases that kernels read elementwise)
+
+memory plan
+  trunk (STREAMED) 16.00 GB
+  embed + lm_head  4.70 GB
+  expert cache     6.00 GB
+  recurrent state  626.25 MB
+  buffers          6.68 MB
+  KV cache         0.00 B
+  TOTAL            27.33 GB
+  available        65.91 GB
+
+trunk stream: 108.81 GB packed, 10/93 layers PINNED (13.16 GB), ring 1 x 2.37 GB
+              reads use O_DIRECT (page cache bypassed)
+              deterministic hit rate 10.8% (a cyclic scan defeats LRU, so a pinned prefix is used instead)
+trunk streaming enabled from /ephemeral/trunk in 0.0 s
+embedding, final norm and lm_head: 4.70 GB in 6.2 s
+
+peak RSS after loading weights: 4.78 GB  (the plan above is a forecast, this is measured)
+expert cache: 341 slots x 17.56 MB = 5.99 GB (0.41% of the 1.45 TB expert pool)
+
+recurrent state for 93 layers: 626.25 MB
+
+STEP   TOKEN      SECONDS      CACHE HIT  READ GB    TOK/S
+--------------------------------------------------------------------
+0      2494       167.84       35.0       83.91      0.006
+1      9          171.65       39.3       94.05      0.006
+--------------------------------------------------------------------
+2 tokens in 339.5 s, 169.75 s/token average
+PEAK RSS for the whole run: 25.83 GB   <- quote this, not the plan
+
+cache [final step]
+  slots        : 341 of 17.56 MB = 5.99 GB arena (341 resident, 0 pinned)
+  requests     : 8832  hits 3472 (39.31%)  misses 5360  evictions 5360
+  read from disk: 94.05 GB in 84.98 s (1107 MB/s while loading)
+
+wrote /ephemeral/base.json
+wrote expert_trace.bin: 16192 requests (126.5 KB)
+I/O share of wall clock: 45.9%  (trunk 71.0 s + experts 85.0 s of 339.5 s)
+  NOTE: the expert figure counts the LAST step only, because cache
+  statistics are reset each step; the trunk figure is cumulative.
+
+trunk [final]
+  pinned 10/93 layers, ring 1 slots
+  binds 186, hits 10 (5.4%), reads 176
+  read 204.72 GB in 71.01 s (2883 MB/s)
+
+--- 5b/5c. incremental, then cgroup-capped floor sweep ---
+############ RUN A: --incremental (exercises the KV term in the memory plan)
+Kimi K3, pure C, real checkpoint
+  shards   : /w/shards
+  prompt   : 5 tokens, generating 3
+
+indexed 497220 tensors from 96 shards in 0.74 s
+trunk on disk : 110.00 GB total (STREAMED from /ephemeral/trunk, not held in RAM)
+
+memory plan
+  trunk (STREAMED) 16.00 GB
+  embed + lm_head  4.70 GB
+  expert cache     6.00 GB
+  recurrent state  626.25 MB
+  buffers          7.35 MB
+  KV cache         21.29 MB
+  TOTAL            27.35 GB
+  available        65.53 GB
+
+trunk stream: 108.81 GB packed, 10/93 layers PINNED (13.16 GB), ring 1 x 2.37 GB
+              reads use O_DIRECT (page cache bypassed)
+              deterministic hit rate 10.8% (a cyclic scan defeats LRU, so a pinned prefix is used instead)
+trunk streaming enabled from /ephemeral/trunk in 0.0 s
+embedding, final norm and lm_head: 4.70 GB in 4.0 s
+
+peak RSS after loading weights: 4.78 GB  (the plan above is a forecast, this is measured)
+expert cache: 341 slots x 17.56 MB = 5.99 GB (0.41% of the 1.45 TB expert pool)
+
+recurrent state for 93 layers: 626.25 MB
+
+incremental decode: KV cache 21.29 MB for 24 MLA layers at 9 positions
+
+STEP   TOKEN      SECONDS      CACHE HIT  READ GB    TOK/S
+--------------------------------------------------------------------
+0      2494       168.68       35.0       83.91      0.006
+1      9          64.96        0.0        25.83      0.015
+2      10         65.28        0.0        25.83      0.015
+--------------------------------------------------------------------
+3 tokens in 298.9 s, 99.64 s/token average
+PEAK RSS for the whole run: 25.84 GB   <- quote this, not the plan
+
+cache [final step]
+  slots        : 341 of 17.56 MB = 5.99 GB arena (341 resident, 0 pinned)
+  requests     : 1472  hits 0 (0.00%)  misses 1472  evictions 1472
+  read from disk: 25.83 GB in 24.17 s (1069 MB/s while loading)
+
+wrote /ephemeral/inc.json
+wrote expert_trace.bin: 10304 requests (80.5 KB)
+I/O share of wall clock: 42.1%  (trunk 101.6 s + experts 24.2 s of 298.9 s)
+  NOTE: the expert figure counts the LAST step only, because cache
+  statistics are reset each step; the trunk figure is cumulative.
+
+trunk [final]
+  pinned 10/93 layers, ring 1 slots
+  binds 279, hits 20 (7.2%), reads 259
+  read 300.63 GB in 101.61 s (2959 MB/s)
+RUN A exit=0
+
+############ RUN B: cgroup-capped floor test with RING=1
+---- MemoryMax=12G, trunk-gb 3, cache-gb 1 ----
+trunk on disk : 110.00 GB total (STREAMED from /ephemeral/trunk, not held in RAM)
+memory plan
+  trunk (STREAMED) 3.00 GB
+  embed + lm_head  4.70 GB
+  expert cache     1.00 GB
+  recurrent state  626.25 MB
+  buffers          4.68 MB
+  KV cache         0.00 B
+  TOTAL            9.33 GB
+  available        65.56 GB
+trunk stream: 108.81 GB packed, 0/93 layers PINNED (0.00 GB), ring 1 x 2.37 GB
+trunk streaming enabled from /ephemeral/trunk in 0.0 s
+embedding, final norm and lm_head: 4.70 GB in 3.6 s
+peak RSS after loading weights: 4.78 GB  (the plan above is a forecast, this is measured)
+expert cache: 56 slots x 17.56 MB = 0.98 GB (0.07% of the 1.45 TB expert pool)
+recurrent state for 93 layers: 626.25 MB
+1 tokens in 134.6 s, 134.61 s/token average
+PEAK RSS for the whole run: 8.73 GB   <- quote this, not the plan
+I/O share of wall clock: 72.6%  (trunk 35.4 s + experts 62.3 s of 134.6 s)
+  statistics are reset each step; the trunk figure is cumulative.
+trunk [final]
+  exit=0
+---- MemoryMax=10G, trunk-gb 3, cache-gb 1 ----
+trunk on disk : 110.00 GB total (STREAMED from /ephemeral/trunk, not held in RAM)
+memory plan
+  trunk (STREAMED) 3.00 GB
+  embed + lm_head  4.70 GB
+  expert cache     1.00 GB
+  recurrent state  626.25 MB
+  buffers          4.68 MB
+  KV cache         0.00 B
+  TOTAL            9.33 GB
+  available        65.48 GB
+trunk stream: 108.81 GB packed, 0/93 layers PINNED (0.00 GB), ring 1 x 2.37 GB
+trunk streaming enabled from /ephemeral/trunk in 0.0 s
+embedding, final norm and lm_head: 4.70 GB in 3.6 s
+peak RSS after loading weights: 4.78 GB  (the plan above is a forecast, this is measured)
+expert cache: 56 slots x 17.56 MB = 0.98 GB (0.07% of the 1.45 TB expert pool)
+recurrent state for 93 layers: 626.25 MB
+1 tokens in 122.4 s, 122.37 s/token average
+PEAK RSS for the whole run: 8.73 GB   <- quote this, not the plan
+I/O share of wall clock: 77.2%  (trunk 35.0 s + experts 59.5 s of 122.4 s)
+  statistics are reset each step; the trunk figure is cumulative.
+trunk [final]
+  exit=0
+---- MemoryMax=9G, trunk-gb 3, cache-gb 1 ----
+trunk on disk : 110.00 GB total (STREAMED from /ephemeral/trunk, not held in RAM)
+memory plan
+  trunk (STREAMED) 3.00 GB
+  embed + lm_head  4.70 GB
+  expert cache     1.00 GB
+  recurrent state  626.25 MB
+  buffers          4.68 MB
+  KV cache         0.00 B
+  TOTAL            9.33 GB
+  available        65.51 GB
+trunk stream: 108.81 GB packed, 0/93 layers PINNED (0.00 GB), ring 1 x 2.37 GB
+trunk streaming enabled from /ephemeral/trunk in 0.0 s
+embedding, final norm and lm_head: 4.70 GB in 3.5 s
+peak RSS after loading weights: 4.78 GB  (the plan above is a forecast, this is measured)
+expert cache: 56 slots x 17.56 MB = 0.98 GB (0.07% of the 1.45 TB expert pool)
+recurrent state for 93 layers: 626.25 MB
+1 tokens in 122.0 s, 121.96 s/token average
+PEAK RSS for the whole run: 8.73 GB   <- quote this, not the plan
+I/O share of wall clock: 76.4%  (trunk 34.9 s + experts 58.3 s of 122.0 s)
+  statistics are reset each step; the trunk figure is cumulative.
+trunk [final]
+  exit=0
