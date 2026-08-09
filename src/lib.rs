@@ -57,8 +57,15 @@
 //! getting it wrong. Anyone adding a chunked KDA path must reinstate them here together
 //! with the fixtures that gate them.
 
+pub mod bind;
+pub mod cache;
 pub mod cfg;
+pub mod io_util;
+pub mod load;
 pub mod ops;
+pub mod st;
+pub mod tok;
+pub mod trunk;
 
 pub use cfg::Cfg;
 pub use ops::{

@@ -1,283 +1,141 @@
-# Kimi-K3 in Rust — Flow
+# Kimi-K3 in Rust - Flow
 
 ## 1. What this program even is
 
-```
-┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                               Hard drive: 1,560 GB model file (the 'brain')                                                │
-│                                                                                                                                            │
-│                                                                                                                                            │
-│ ┌────────────────────────────────────────────┐                                                       ┌───────────────────────────────────┐ │
-│ │                                            │                                                       │                                   │ │
-│ │                                            │                                                       │                                   │ │
-│ │                Main weights                │                                                       │      896 'experts' per layer      │ │
-│ │          109 GB, used EVERY step           │                                                       │ 1,450 GB, only 16 needed per step │ │
-│ │                                            │                                                       │                                   │ │
-│ └──────────────────────┬─────────────────────┘                                                       └─────────────────┬─────────────────┘ │
-│                        │                                                                                               │                   │
-└────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────┼───────────────────┘
-                read in a fixed loop,                                                                                     │                                                        
-                like a conveyor belt                                                                                      │                                                        
-                          │                                                                                               │                                                        
-┌────────────────────────┼───────────────────────┐                                                                       │                                                        
-│          Your RAM: as little as 8 GB           │                                                                       │                                                        
-│                        │                       │                                                                       │                                                        
-│                        ▼                       │                                                                       │                                                        
-│ ┌────────────────────────────────────────────┐ │                                                                       │                                                        
-│ │                                            │ │                                                                       │                                                        
-│ │             Small working area             │◄┼──────────────────────fetch─only─the─16─needed,────────────────────────┘                                                        
-│ │                                            │ │                     keep recent ones on a shelf                                                                                
-│ └──────────────────────┬─────────────────────┘ │                                                                                                                                
-│                        │                       │                                                                                                                                
-└────────────────────────┼───────────────────────┘                                                                                                                                
-                          │                                                                                                                                                        
-                          │                                                                                                                                                        
-                          ▼                                                                                                                                                        
-   ┌────────────────────────────────────────────┐                                                                                                                                  
-   │                                            │                                                                                                                                  
-   │             next word of text              │                                                                                                                                  
-   │                                            │                                                                                                                                  
-   └────────────────────────────────────────────┘                                                                                                                                  
-                                                                                                                                                                                   
-Trick: never hold the whole brain in RAM. More RAM = faster, never different answers. Same answer on 8 GB laptop and 224 GB server, byte for byte. That promise is the whole      
-project.                                                                                                                                                                          
+```mermaid
+flowchart TB
+    subgraph DISK["Hard drive: 1,560 GB model file - the brain"]
+        MAIN["Main weights<br/>109 GB, used every step"]
+        EXPERTS["896 experts per layer<br/>1,450 GB, only 16 needed per step"]
+    end
+
+    subgraph MEMORY["Your RAM: as little as 8 GB"]
+        WORK["Small working area"]
+    end
+
+    MAIN -->|"Read in a fixed loop<br/>like a conveyor belt"| WORK
+    EXPERTS -->|"Fetch only the 16 needed<br/>keep recent ones on a shelf"| WORK
+    WORK --> TOKEN["Next word of text"]
 ```
 
-## 2. The parts (C file → Rust module, plain names)
+Trick: never hold the whole brain in RAM.
+More RAM makes it faster, never different.
+The same prompt produces the same answer on an 8 GB laptop and a 224 GB server, byte for byte.
+That promise is the whole project.
 
-```
-┌────────────────────────────────────────────┐                                                                                                                                    
-│                 Math side                  │                                                                                                                                    
-│                                            │                                                                                                                                    
-│                                            │                                                                                                                                    
-│ ┌────────────────────────────────────────┐ │                                                                                                                                    
-│ │                                        │ │                                                                                                                                    
-│ │                                        │ │                                                                                                                                    
-│ │               Math core                │◄┌┐                                                                                                                                   
-│ │       (ops/) all the arithmetic        │ ││                                                                                                                                   
-│ │                                        │ ││                                                                                                                                   
-│ └────────────────────┬───────────────────┘ ││                                                                                                                                   
-│                      │                     ││                                                                                                                                   
-│                      │                     ││                                                                                                                                   
-│                      │                     ││                                                                                                                                   
-│                      │                     ││                                                                                                                                   
-│                      ▼                     ││                                                                                                                                   
-│ ┌────────────────────────────────────────┐ ││                                                                                                                                   
-│ │                                        │ ││                                                                                                                                   
-│ │                                        │ ││                                                                                                                                   
-│ │               Front door               ├─┼┼──┬─────────────────┐                                                                                                              
-│ │        (main.rs) the k3 command        │ ││  │                 │                                                                                                              
-│ │                                        │ ││  │                 │                                                                                                              
-│ └────────────────────┬───────────────────┘ ││  └─────────────────┼───────────────────────────────────────┐                                                                      
-│                      │                     ││                    │                                       │                                                                      
-│                      │                     ││                    │                                       │                                                                      
-│                      │                     ││                    │                                       │                                                                      
-│                      │                     ││                    │                                       │                                                                      
-│                      │                     ││                    │                                       │                                                                      
-│                      │                     ││                    │                                       │                                                                      
-│                      │                     ││                    │                                       │                                                                      
-│                      │                     ││                    │                                       │                                                                      
-│                      ▼                     ││                    ▼                                       ▼                                                                      
-│ ┌────────────────────────────────────────┐ ││  ┌──────────────────────────────────┐     ┌─────────────────────────────────┐                                                     
-│ │                                        │ ││  │                                  │     │                                 │                                                     
-│ │                                        │ ││  │                                  │     │                                 │                                                     
-│ │              Word chopper              │ ││  │         Settings reader          │     │            File index           │                                                     
-│ │          (tok/) text→numbers           │ ││  │    (cfg.rs) refuses to guess     │     │ (st.rs) where every piece lives │                                                     
-│ │                                        │ ││  │                                  │     │                                 │                                                     
-│ └────────────────────────────────────────┘ ││  └──────────────────────────────────┘     └─────────────────────────────────┘                                                     
-│                                            ││                                                            │                                                                      
-│                                            ││                                                            │                                                                      
-│                      ┌─────────────────────┼┼────────────────────┬───────────────────────────────────────┤                                                                      
-│                      │                     ││                    │                                       │                                                                      
-│                      ▼                     ││                    ▼                                       ▼                                                                      
-│ ┌────────────────────────────────────────┐ ││  ┌──────────────────────────────────┐     ┌─────────────────────────────────┐                                                     
-│ │                                        │ ││  │                                  │     │                                 │                                                     
-│ │                                        │ ││  │                                  │     │                                 │                                                     
-│ │             Conveyor belt              │ ││  │            Hot shelf             │     │          Expert fetcher         │                                                     
-│ │ (trunk.rs) main weights cycle thru RAM │ ││  │ (cache.rs) recently-used experts │     │  (load.rs) one read per expert  │                                                     
-│ │                                        │ ││  │                                  │     │                                 │                                                     
-│ └────────────────────┬───────────────────┘ ││  └─────────────────┬────────────────┘     └─────────────────────────────────┘                                                     
-│                      │                     ││                    │                                                                                                              
-│                      │                     ││                    │                                                                                                              
-│                      │                     ││                    │                                                                                                              
-│                      │                     ││                    │                                                                                                              
-│                      │                     ││                    │                                                                                                              
-│                      │                     ││                    │                                                                                                              
-│                      │                     ││                    │                                                                                                              
-│                      │                     ││                    │                                                                                                              
-│                      ▼                     ││                    │                                                                                                              
-│ ┌────────────────────────────────────────┐ ││                    │                                                                                                              
-│ │                                        │ ││                    │                                                                                                              
-│ │                                        │ ││                    │                                                                                                              
-│ │               Assembler                ├◄┼┴────────────────────┘                                                                                                              
-│ │  (bind.rs) points math at right bytes  │ │                                                                                                                                    
-│ │                                        │ │                                                                                                                                    
-│ └────────────────────────────────────────┘ │                                                                                                                                    
-│                                            │                                                                                                                                    
-└────────────────────────────────────────────┘                                                                                                                                    
+## 2. The parts (C file to Rust module, plain names)
+
+```mermaid
+flowchart TB
+    subgraph MATH["Math side"]
+        MAIN["Front door<br/>(main.rs) the k3 command"]
+        OPS["Math core<br/>(ops/) all arithmetic"]
+        TOK["Word chopper<br/>(tok/) text to numbers"]
+        CFG["Settings reader<br/>(cfg.rs) refuses to guess"]
+        ST["File index<br/>(st.rs) where every piece lives"]
+        TRUNK["Conveyor belt<br/>(trunk.rs) main weights cycle through RAM"]
+        CACHE["Hot shelf<br/>(cache.rs) recently used experts"]
+        LOAD["Expert fetcher<br/>(load.rs) one read per expert"]
+        BIND["Assembler<br/>(bind.rs) points math at the right bytes"]
+
+        MAIN --> OPS
+        MAIN --> TOK
+        MAIN --> CFG
+        MAIN --> ST
+        MAIN --> TRUNK
+        ST --> LOAD
+        LOAD --> CACHE
+        LOAD --> BIND
+        TRUNK --> BIND
+        CACHE --> BIND
+        BIND --> OPS
+    end
 ```
 
 ## 3. One word generated, start to finish
 
-```
- ┌─────┐               ┌────────┐                                                              ┌──────┐                                                                           
- │ You │               │ Engine │                                                              │ Disk │                                                                           
- └──┬──┘               └────┬───┘                                                              └───┬──┘                                                                           
-    │                       │                                                                      │                                                                              
-    │      prompt text      │                                                                      │                                                                              
-    │───────────────────────▶                                                                      │                                                                              
-    │                       │                                                                      │                                                                              
-    │                       ├───┐                                                                  │                                                                              
-    │                       │   │ chop text into numbers                                           │                                                                              
-    │                       ◀───┘                                                                  │                                                                              
-    │                       │                                                                      │                                                                              
-    │                   ┌loop [93 layers, fixed order]─────────────────────────────────────────────────┐                                                                          
-    │                   │   │                                                                      │   │                                                                          
-    │                   │   │  belt delivers layer's weights (next one preloads while math runs)   │   │                                                                          
-    │                   │   ◀╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌│   │                                                                          
-    │                   │   │                                                                      │   │                                                                          
-    │                   │   ├───┐                                                                  │   │                                                                          
-    │                   │   │   │ attention math                                                   │   │                                                                          
-    │                   │   ◀───┘                                                                  │   │                                                                          
-    │                   │   │                                                                      │   │                                                                          
-    │                   │   ├───┐                                                                  │   │                                                                          
-    │                   │   │   │ pick 16 of 896 experts                                           │   │                                                                          
-    │                   │   ◀───┘                                                                  │   │                                                                          
-    │                   │   │                                                                      │   │                                                                          
-    │                   │alt [expert on hot shelf]─────────────────────────────────────────────────────│                                                                          
-    │                   │   │                                                                      │   │                                                                          
-    │                   │   ├───┐                                                                  │   │                                                                          
-    │                   │   │   │ use it, free                                                     │   │                                                                          
-    │                   │   ◀───┘                                                                  │   │                                                                          
-    │                   │   │                                                                      │   │                                                                          
-    │                   │[not on shelf]╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌│                                                                          
-    │                   │   │                                                                      │   │                                                                          
-    │                   │   │                read 17.5 MB, shelve it, evict oldest                 │   │                                                                          
-    │                   │   ◀╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌│   │                                                                          
-    │                   │   │                                                                      │   │                                                                          
-    │                   │──────────────────────────────────────────────────────────────────────────────│                                                                          
-    │                   │   │                                                                      │   │                                                                          
-    │                   └──────────────────────────────────────────────────────────────────────────────┘                                                                          
-    │                       │                                                                      │                                                                              
-    │  next word. repeat.   │                                                                      │                                                                              
-    ◀───────────────────────│                                                                      │                                                                              
-    │                       │                                                                      │                                                                              
- ┌──┴──┐               ┌────┴───┐                                                              ┌───┴──┐                                                                           
- │ You │               │ Engine │                                                              │ Disk │                                                                           
- └─────┘               └────────┘                                                              └──────┘                                                                           
+```mermaid
+sequenceDiagram
+    actor U as You
+    participant E as Engine
+    participant D as Disk
+
+    U->>E: Prompt text
+    E->>E: Chop text into numbers
+
+    loop 93 layers in fixed order
+        D-->>E: Deliver layer weights while the next layer preloads
+        E->>E: Run attention math
+        E->>E: Pick 16 of 896 experts
+
+        alt Expert is on the hot shelf
+            E->>E: Use cached expert
+        else Expert is not on the shelf
+            E->>D: Request expert
+            D-->>E: Read 17.5 MB, shelve it, evict the oldest
+        end
+    end
+
+    E-->>U: Next word
+    Note over U,E: Repeat for the next word
 ```
 
 ## 4. Build order (the 8 steps in the plan)
 
-```
-┌──────────────────────────────────────┐                                                                                                                                          
-│                                      │                                                                                                                                          
-│                                      │                                                                                                                                          
-│       1. Skeleton + math core        │                                                                                                                                          
-│  the arithmetic, translated exactly  │                                                                                                                                          
-│                                      │                                                                                                                                          
-└──────────────────────────────────────┘                                                                                                                                          
-                    │                                                                                                                                                             
-                    │                                                                                                                                                             
-                    ├────────────────────────────────────┐                                                                                                                        
-                    │                                    │                                                                                                                        
-                    ▼                                    ▼                                                                                                                        
-┌──────────────────────────────────────┐     ┌───────────────────────┐                                                                                                            
-│                                      │     │                       │                                                                                                            
-│                                      │     │                       │                                                                                                            
-│ 2. Big math blocks + settings reader │     │ 8. Speed measurements │                                                                                                            
-│          + mini-model exam           │     │                       │                                                                                                            
-│                                      │     │                       │                                                                                                            
-└──────────────────────────────────────┘     └───────────────────────┘                                                                                                            
-                    │                                                                                                                                                             
-                    │                                                                                                                                                             
-                    ├────────────────────────────────────┬─────────────────────────────────┬─────────────────────────────┐                                                        
-                    │                                    │                                 │                             │                                                        
-                    ▼                                    ▼                                 ▼                             ▼                                                        
-┌──────────────────────────────────────┐     ┌───────────────────────┐     ┌──────────────────────────────┐     ┌─────────────────┐                                               
-│                                      │     │                       │     │                              │     │                 │                                               
-│    3. File index + expert fetcher    │     │      4. Hot shelf     │     │ 5. Conveyor belt + assembler │     │ 6. Word chopper │                                               
-│                                      │     │                       │     │                              │     │                 │                                               
-└───────────────────┬──────────────────┘     └───────────┬───────────┘     └───────────────┬──────────────┘     └────────┬────────┘                                               
-                    │                                    │                                 │                             │                                                        
-                    │                                    │                                 │                             │                                                        
-                    ├────────────────────────────────────┴─────────────────────────────────┴─────────────────────────────┘                                                        
-                    │                                                                                                                                                             
-                    ▼                                                                                                                                                             
-┌──────────────────────────────────────┐                                                                                                                                          
-│                                      │                                                                                                                                          
-│         7. Front door (CLI)          │                                                                                                                                          
-│                                      │                                                                                                                                          
-└──────────────────────────────────────┘                                                                                                                                          
+```mermaid
+flowchart TB
+    S1["1. Skeleton and math core<br/>Translate the arithmetic exactly"]
+    S2["2. Big math blocks, settings reader,<br/>and mini-model exam"]
+    S3["3. File index and expert fetcher"]
+    S4["4. Hot shelf"]
+    S5["5. Conveyor belt and assembler"]
+    S6["6. Word chopper"]
+    S7["7. Front door - CLI"]
+    S8["8. Speed measurements"]
+
+    S1 --> S2
+    S1 --> S8
+    S2 --> S3
+    S2 --> S4
+    S2 --> S5
+    S2 --> S6
+    S3 --> S7
+    S4 --> S7
+    S5 --> S7
+    S6 --> S7
 ```
 
-Steps 3–6 independent, can go in any order. Each step ships with its own tests passing.
+Steps 3 through 6 are independent and can happen in any order.
+Each step ships with its own tests passing.
 
-## 5. Why "exactly the same answer" is hard, and the rule that fixes it
+## 5. Why exactly the same answer is hard, and the rule that fixes it
 
-```
-┌──────────────────────────┐     ┌─────────────────────────────────┐     ┌───────────────┐                                                                                        
-│                          │     │                                 │     │               │                                                                                        
-│                          │     │                                 │     │               │                                                                                        
-│   C code adds numbers    ├────►│      Rust copies that order     ├────►│ Same bits out │                                                                                        
-│ in a very specific order │     │ line by line, no 'improvements' │     │               │                                                                                        
-│                          │     │                                 │     │               │                                                                                        
-└──────────────────────────┘     └─────────────────────────────────┘     └───────────────┘                                                                                        
+```mermaid
+flowchart LR
+    C["C code adds numbers<br/>in a specific order"]
+    R["Rust copies that order<br/>line by line, with no improvements"]
+    SAME["Same bits out"]
 
+    REORDER["Reorder the additions<br/>compilers love to do this"]
+    DRIFT["Tiny drift<br/>different word 500 tokens later"]
 
-
-┌──────────────────────────┐     ┌─────────────────────────────────┐                                                                                                              
-│                          │     │                                 │                                                                                                              
-│                          │     │                                 │                                                                                                              
-│     Reorder the adds     ├┄┄┄┄►│      Tiny drift → different     │                                                                                                          
-│   (compilers love to)    │     │      word 500 tokens later      │                                                                                                          
-│                          │     │                                 │                                                                                                          
-└──────────────────────────┘     └─────────────────────────────────┘                                                                                                          
+    C --> R --> SAME
+    REORDER -.-> DRIFT
 ```
 
-Floating-point math: (a+b)+c ≠ a+(b+c) in the last digit. C code pins the order; plan has a translation table so Rust pins the identical order. Fast paths (SIMD) built so
-they cannot reorder either.
+Floating-point math means `(a + b) + c` is not always equal to `a + (b + c)` in the last digit.
+The C code pins the order.
+The Rust translation table pins the identical order, line by line.
+Fast SIMD paths must preserve that order too.
 
 ## 6. How we know it worked (proof ladder)
 
-```
-┌────────────────────────────────┐                                                                                                                                            
-│                                │                                                                                                                                            
-│                                │                                                                                                                                            
-│ Each math piece vs 15 recorded │                                                                                                                                            
-│     question/answer files      │                                                                                                                                            
-│                                │                                                                                                                                            
-└────────────────┬───────────────┘                                                                                                                                            
-                 │                                                                                                                                                            
-                 │                                                                                                                                                            
-                 │                                                                                                                                                            
-                 │                                                                                                                                                            
-                 │                                                                                                                                                            
-                 │                                                                                                                                                            
-                 ▼                                                                                                                                                            
-┌────────────────────────────────┐                                                                                                                                            
-│                                │                                                                                                                                            
-│               G1               │                                                                                                                                            
-│                                │                                                                                                                                            
-└────────────────┬───────────────┘                                                                                                                                            
-                 │                                                                                                                                                            
-                 │                                                                                                                                                            
-                 │                                                                                                                                                            
-                 │                                                                                                                                                            
-                 ▼                                                                                                                                                            
-┌────────────────────────────────┐                                                                                                                                            
-│                                │                                                                                                                                            
-│               G2               │                                                                                                                                            
-│                                │                                                                                                                                            
-└────────────────┬───────────────┘                                                                                                                                            
-                 │                                                                                                                                                            
-                 │                                                                                                                                                            
-                 │                                                                                                                                                            
-                 │                                                                                                                                                            
-                 ▼                                                                                                                                                            
-┌────────────────────────────────┐                                                                                                                                            
-│                                │                                                                                                                                            
-│               G3               │                                                                                                                                            
-│                                │                                                                                                                                            
-└────────────────────────────────┘                                                                                                                                            
+```mermaid
+flowchart TB
+    OPS["Each math piece compared with<br/>15 recorded question and answer files"]
+    G1["G1"]
+    G2["G2"]
+    G3["G3"]
+
+    OPS --> G1 --> G2 --> G3
 ```

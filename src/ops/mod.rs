@@ -492,13 +492,17 @@ pub fn kda_step(
 /// pragma, kept so small matmuls do not pay for a fork.
 pub fn matmul(y: &mut [f32], x: &[f32], w: &[f32], input: usize) {
     let dot = dispatch::kernels().f32;
+    // SAFETY: `dispatch::select` installs a feature-gated kernel only after runtime
+    // detection confirmed the CPU has it; on every other target the pointer holds the
+    // portable body. The same argument covers the three kernels below.
+    let row = |o: usize| &w[o * input..o * input + input];
     if y.len() > 64 {
         y.par_iter_mut().enumerate().for_each(|(o, yo)| {
-            *yo = dot(&w[o * input..o * input + input], x) as f32;
+            *yo = unsafe { dot(row(o), x) } as f32;
         });
     } else {
         for (o, yo) in y.iter_mut().enumerate() {
-            *yo = dot(&w[o * input..o * input + input], x) as f32;
+            *yo = unsafe { dot(&w[o * input..o * input + input], x) } as f32;
         }
     }
 }
@@ -513,11 +517,11 @@ pub fn matmul_bf16(y: &mut [f32], x: &[f32], w: &[u16], input: usize) {
     let dot = dispatch::kernels().bf16;
     if y.len() > 64 {
         y.par_iter_mut().enumerate().for_each(|(o, yo)| {
-            *yo = dot(&w[o * input..o * input + input], x) as f32;
+            *yo = unsafe { dot(&w[o * input..o * input + input], x) } as f32;
         });
     } else {
         for (o, yo) in y.iter_mut().enumerate() {
-            *yo = dot(&w[o * input..o * input + input], x) as f32;
+            *yo = unsafe { dot(&w[o * input..o * input + input], x) } as f32;
         }
     }
 }
@@ -531,7 +535,7 @@ pub fn matmul_q8(y: &mut [f32], x: &[f32], w: &[u8], input: usize) {
     let body = |o: usize, yo: &mut f32| {
         let row = &w[o * rowb..o * rowb + rowb];
         let scale = f32::from_ne_bytes([row[0], row[1], row[2], row[3]]);
-        *yo = dot(&row[4..], x) * scale;
+        *yo = unsafe { dot(&row[4..], x) } * scale;
     };
     if y.len() > 64 {
         y.par_iter_mut().enumerate().for_each(|(o, yo)| body(o, yo));
@@ -578,13 +582,15 @@ pub fn matmul_mxfp4(
     let pcols = input / 2;
     let ngrp = (input + group - 1) / group;
     let body = |r: usize, yr: &mut f32| {
-        *yr = dot(
-            &packed[r * pcols..(r + 1) * pcols],
-            &scales[r * ngrp..(r + 1) * ngrp],
-            x,
-            input,
-            group,
-        ) as f32;
+        *yr = unsafe {
+            dot(
+                &packed[r * pcols..(r + 1) * pcols],
+                &scales[r * ngrp..(r + 1) * ngrp],
+                x,
+                input,
+                group,
+            )
+        } as f32;
     };
     if y.len() > 64 {
         y.par_iter_mut().enumerate().for_each(|(r, yr)| body(r, yr));
@@ -879,7 +885,12 @@ pub fn mla_cached(
         let xt = &x[t * e..t * e + e];
         mmw(ql, xt, w.q_a, e);
         rmsnorm_ip(ql, w.q_a_norm, c.rms_eps);
-        mmw(&mut q[t * h * qh..(t + 1) * h * qh], ql, w.q_b, c.q_lora as usize);
+        mmw(
+            &mut q[t * h * qh..(t + 1) * h * qh],
+            ql,
+            w.q_b,
+            c.q_lora as usize,
+        );
 
         // ONE projection emits the compressed latent AND the shared rope slot
         mmw(ct, xt, w.kv_a, e);
