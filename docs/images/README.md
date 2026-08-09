@@ -8,23 +8,28 @@ pinned per run via `OMP_NUM_THREADS` and `RAYON_NUM_THREADS`.
 
 | figure | what it shows |
 | --- | --- |
-| `rust_vs_c_kernels.png` | the two kernel benchmarks in both languages, at one core and at ten |
+| `end_to_end.png` | seconds per token for the whole engine, C against Rust, at one two four and ten threads |
+| `rust_vs_c_kernels.png` | per-kernel speedup against a parity line, at one core and at ten |
 | `perf_kernel_scaling.png` | throughput against thread count, four series |
 | `perf_scaling_efficiency.png` | parallel speedup against each build's own single-thread time |
 | `perf_bf16_instructions.png` | why bf16 differs: load and unpack against arithmetic, from the disassembly |
-| `fma_instruction_mix.png` | aarch64 `fmla.2d` per kernel, 8/8/4 on both sides |
 | `binary_sizes.png` | `target/release/k3` at 1,159,344 bytes, then the nine test binaries |
 | `port_loc.png` | lines of Rust per module, largest first |
 | `verification-ladder.png` | fixtures, the three oracle gates, then the byte-for-byte logits compare |
 
-The four performance figures are a fair comparison: both builds threaded, both at their
+The five performance figures are a fair comparison: both builds threaded, both at their
 real optimisation settings, thread count pinned, and the same input bytes producing the
-same output bytes on both sides before any timing was compared. `rust_vs_c_kernels.png`
-shows one core and ten side by side so nothing rests on a threading difference, and
+same output bytes on both sides before any timing was compared. `end_to_end.png` runs the
+complete decode loop rather than two kernels, and asserts identical token ids from both
+binaries before reporting a single number. `rust_vs_c_kernels.png` is drawn as a ratio
+against parity because absolute milliseconds put a 2.4 ms kernel beside an 18.6 ms one,
+where the smaller pair collapses into two stubs and the real finding - that MXFP4 lands
+exactly on parity, as an identical instruction mix predicts - reads as nothing at all.
 `perf_bf16_instructions.png` traces the one gap that remains to a specific
 instruction-selection choice in the bf16 unpack.
 
-Raw timings: [`../data/perf-sweep.csv`](../data/perf-sweep.csv).
+Raw timings: [`../data/perf-sweep.csv`](../data/perf-sweep.csv) (kernels) and
+[`../data/end-to-end.csv`](../data/end-to-end.csv) (whole engine).
 
 ## Regenerating
 

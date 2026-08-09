@@ -14,6 +14,8 @@ https://github.com/FareedKhan-dev/kimi-k3-in-c
 Usage:  python _plots.py
 """
 
+import csv
+
 import matplotlib
 
 matplotlib.use("Agg")
@@ -120,6 +122,23 @@ SWEEP_GF = {
 }
 
 
+# The whole engine, not two kernels. Read straight from the CSV that
+# tools/bench_end_to_end.py wrote, rather than transcribed: deriving a speedup from
+# already-rounded seconds is how 1.144x becomes 1.15x. Per-step seconds on a synthetic
+# 13-layer model at hidden 2048 (9 KDA / 4 MLA / 1 dense / 12 MoE), prefill excluded,
+# median of five runs. Both binaries read the same bytes and emitted identical token ids.
+def _load_e2e():
+    rows = {}
+    with open(OUT.parent / "data" / "end-to-end.csv") as f:
+        for r in csv.DictReader(f):
+            rows[(r["lang"], int(r["threads"]))] = float(r["s_per_token"])
+    threads = sorted({t for _, t in rows})
+    return threads, {lang: [rows[(lang, t)] for t in threads] for lang in ("C", "Rust")}
+
+
+E2E_THREADS, E2E_S = _load_e2e()
+
+
 def binary_sizes():
     """LOLLIPOP. cargo build --release on this machine, then ls -l on what it
     produced: the engine first, then the nine test binaries that gate it."""
@@ -167,47 +186,123 @@ def binary_sizes():
     save(fig, "binary_sizes")
 
 
+def end_to_end():
+    """GROUPED BARS + SPEEDUP. The headline: the whole engine, not two kernels."""
+    fig, (ax, ax2) = plt.subplots(
+        1, 2, figsize=(10.8, 4.1), gridspec_kw={"width_ratios": [1.55, 1]}
+    )
+    xs = np.arange(len(E2E_THREADS), dtype=float)
+    c, r = np.array(E2E_S["C"]), np.array(E2E_S["Rust"])
+    ax.bar(xs - 0.19, c, width=0.34, color=GRAY, edgecolor="white", label="C")
+    ax.bar(xs + 0.19, r, width=0.34, color=GREEN, edgecolor="white", label="Rust")
+    for x, v in zip(xs - 0.19, c):
+        ax.text(x, v + 0.0022, f"{v:.3f}", ha="center", fontsize=9.5, color=MUTE)
+    for x, v in zip(xs + 0.19, r):
+        ax.text(
+            x,
+            v + 0.0022,
+            f"{v:.3f}",
+            ha="center",
+            fontsize=9.5,
+            color=INK,
+            fontweight="bold",
+        )
+    ax.set_xticks(xs)
+    ax.set_xticklabels(
+        [f"{t} thread" if t == 1 else f"{t} threads" for t in E2E_THREADS]
+    )
+    ax.set_ylim(0, max(c) * 1.22)
+    ax.legend(frameon=False, fontsize=9.5, loc="upper right")
+    style(ax, "Seconds per token, whole engine", None, "seconds per token")
+
+    # Same numbers as a ratio, so the gap is readable without eyeballing bar heights.
+    ax2.axhline(1.0, color="#9ca3af", linewidth=1.2, linestyle="--", zorder=1)
+    ax2.text(xs[-1] + 0.45, 1.015, "parity", fontsize=9, color=MUTE, ha="right")
+    sp = c / r
+    ax2.bar(xs, sp, width=0.5, color=GREEN, edgecolor="white", zorder=2)
+    for x, v in zip(xs, sp):
+        ax2.text(
+            x,
+            v + 0.012,
+            f"{v:.2f}x",
+            ha="center",
+            fontsize=10,
+            color=INK,
+            fontweight="bold",
+        )
+    ax2.set_xticks(xs)
+    ax2.set_xticklabels([str(t) for t in E2E_THREADS])
+    ax2.set_ylim(0.9, max(sp) * 1.12)
+    style(ax2, "Rust speedup over C", "threads")
+
+    fig.suptitle(
+        "The whole engine: 13 layers of KDA, MLA, dense and MoE, decoding token by token",
+        fontsize=13,
+        color=INK,
+        fontweight="bold",
+        y=1.04,
+    )
+    fig.text(
+        0.5,
+        -0.09,
+        "Synthetic checkpoint at hidden 2048, prefill excluded, median of five runs. "
+        "Both binaries read the same\nbytes and emitted identical token ids. "
+        "Past four threads both hit the memory wall and the gap narrows.",
+        ha="center",
+        fontsize=9.5,
+        color=MUTE,
+    )
+    save(fig, "end_to_end")
+
+
 def rust_vs_c_kernels():
-    """GROUPED HORIZONTAL BARS. The headline: both builds threaded, at 1 core and at 10."""
-    labels = ["bf16 matmul\n12288 x 7168", "MXFP4 matmul\n3072 x 3584"]
-    fig, axes = plt.subplots(1, 2, figsize=(10.6, 3.9))
-    for ax, ti, tname in zip(axes, [0, 5], ["one core", "all 10 cores"]):
-        c = [SWEEP_MS[("C", k)][ti] for k in ("bf16", "mxfp4")]
-        r = [SWEEP_MS[("Rust", k)][ti] for k in ("bf16", "mxfp4")]
-        ys = np.arange(2, dtype=float)[::-1]
-        ax.barh(ys + 0.18, c, height=0.30, color=GRAY, edgecolor="white", label="C")
-        ax.barh(ys - 0.18, r, height=0.30, color=GREEN, edgecolor="white", label="Rust")
-        for y, v in zip(ys + 0.18, c):
-            ax.text(v * 1.05, y, f"{v:.2f} ms", va="center", fontsize=9.5, color=MUTE)
-        for y, v in zip(ys - 0.18, r):
+    """SPEEDUP BARS against a parity line. Absolute milliseconds put a 2.4 ms kernel
+    next to an 18.6 ms one, where the smaller pair collapses into two stubs and the
+    real finding - that MXFP4 lands ON parity, exactly as an identical instruction mix
+    predicts - reads as nothing at all. A ratio puts both kernels on one scale."""
+    fig, ax = plt.subplots(figsize=(9.6, 4.0))
+    kernels = [
+        ("bf16", "bf16 matmul\n12288 x 7168"),
+        ("mxfp4", "MXFP4 matmul\n3072 x 3584"),
+    ]
+    ys = np.arange(len(kernels), dtype=float)[::-1]
+
+    ax.axvline(1.0, color="#9ca3af", linewidth=1.3, linestyle="--", zorder=1)
+    ax.text(1.04, -0.50, "parity", ha="left", fontsize=9.5, color=MUTE)
+    for off, ti, col, lab in [
+        (0.17, 0, TEAL, "one core"),
+        (-0.17, 5, GREEN, "all 10 cores"),
+    ]:
+        sp = [SWEEP_MS[("C", k)][ti] / SWEEP_MS[("Rust", k)][ti] for k, _ in kernels]
+        ax.barh(
+            ys + off, sp, height=0.29, color=col, edgecolor="white", label=lab, zorder=2
+        )
+        for y, v, (k, _) in zip(ys + off, sp, kernels):
+            cm, rm = SWEEP_MS[("C", k)][ti], SWEEP_MS[("Rust", k)][ti]
             ax.text(
-                v * 1.05,
+                v + 0.045,
                 y,
-                f"{v:.2f} ms",
+                f"{v:.2f}x    {cm:.2f} -> {rm:.2f} ms",
                 va="center",
                 fontsize=9.5,
                 color=INK,
                 fontweight="bold",
             )
-        ax.set_yticks(ys)
-        ax.set_yticklabels(labels, fontsize=9.5)
-        ax.set_ylim(-0.62, 1.62)
-        ax.set_xlim(0, max(c + r) * 1.42)
-        ax.legend(frameon=False, fontsize=9, loc="lower right")
-        style(ax, tname, "milliseconds per call", grid="x")
-    fig.suptitle(
-        "The same two kernels in both languages, same inputs, same output bytes",
-        fontsize=13,
-        color=INK,
-        fontweight="bold",
-        y=1.03,
+    ax.set_yticks(ys)
+    ax.set_yticklabels([lab for _, lab in kernels], fontsize=10)
+    ax.set_ylim(-0.62, 1.62)
+    ax.set_xlim(0, 3.1)
+    ax.legend(frameon=False, fontsize=9.5, loc="lower right")
+    style(
+        ax, "Rust speedup over C, per kernel", "times faster than the C build", grid="x"
     )
     fig.text(
         0.5,
-        -0.07,
-        "Median of five runs each. bf16 is about 2x faster in Rust at "
-        "every thread count; MXFP4 is a tie.\nBoth builds threaded: OpenMP for C, "
-        "rayon for Rust.",
+        -0.10,
+        "Median of five runs, same inputs, byte-identical outputs. MXFP4 sits on the "
+        "parity line, which is the\nexpected result: both builds issue the same "
+        "instructions for it. bf16 is the one that diverges, and\nthe cause is the "
+        "unpack, not the arithmetic.",
         ha="center",
         fontsize=9.5,
         color=MUTE,
@@ -374,59 +469,6 @@ def perf_bf16_instructions():
     save(fig, "perf_bf16_instructions")
 
 
-def fma_instruction_mix():
-    """GROUPED BARS. Disassembly of the release numeric core on this arm64
-    machine: fmla.2d in each kernel body, C against Rust."""
-    kernels = [
-        "f32 matmul\nmatmul  /  dot_f32",
-        "bf16 matmul\nmatmul_bf16  /  dot_bf16",
-        "MXFP4 matmul\nmatmul_mxfp4  /  dot_mxfp4",
-    ]
-    c, r = [8, 8, 4], [8, 8, 4]
-    fig, ax = plt.subplots(figsize=(9.0, 4.0))
-    xs = np.arange(len(kernels), dtype=float)
-    ax.bar(xs - 0.17, c, width=0.32, color=GRAY, edgecolor="white", label="C")
-    ax.bar(xs + 0.17, r, width=0.32, color=GREEN, edgecolor="white", label="Rust")
-    for x, v in list(zip(xs - 0.17, c)) + list(zip(xs + 0.17, r)):
-        ax.text(
-            x,
-            v + 0.18,
-            str(v),
-            ha="center",
-            fontsize=11.5,
-            color=INK,
-            fontweight="bold",
-        )
-    ax.set_xticks(xs)
-    ax.set_xticklabels(kernels, fontsize=9.5)
-    ax.set_ylim(0, 11)
-    ax.legend(frameon=False, fontsize=9.5, loc="upper right")
-    style(
-        ax,
-        "Two languages, one instruction mix: 8, 8 and 4 vector FMAs either way",
-        None,
-        "fmla.2d in the kernel body",
-    )
-    ax.text(
-        -0.46,
-        9.6,
-        "20 fmla.2d and 3 scalar fmadd across the whole numeric core, on both sides",
-        fontsize=9.5,
-        color=MUTE,
-    )
-    ax.text(
-        0,
-        -0.24,
-        "On x86-64 the same three Rust kernels emit 4, 4 and 2 "
-        "vfmadd*pd, matching the C accumulator counts.",
-        transform=ax.transAxes,
-        fontsize=9.5,
-        color=MUTE,
-        va="top",
-    )
-    save(fig, "fma_instruction_mix")
-
-
 def port_loc():
     """LOLLIPOP. wc -l over src/ in the Rust port, largest module first."""
     mods = [
@@ -477,10 +519,11 @@ def port_loc():
     )
     save(fig, "port_loc")
 
+
 FNS = [
     binary_sizes,
     port_loc,
-    fma_instruction_mix,
+    end_to_end,
     rust_vs_c_kernels,
     perf_kernel_scaling,
     perf_scaling_efficiency,

@@ -47,6 +47,8 @@
   - [10. What is not ported](#10-what-is-not-ported)
 - [How we know it is the same engine](#how-we-know-it-is-the-same-engine)
 - [C against Rust, measured](#c-against-rust-measured)
+  - [The whole engine](#the-whole-engine)
+  - [The two hot kernels](#the-two-hot-kernels)
 - [Things the port turned up](#things-the-port-turned-up)
 - [Size and shape](#size-and-shape)
 - [Development](#development)
@@ -161,9 +163,8 @@ The lane algebra is in the module docs. For NEON the sixteen scalar accumulators
 eight vectors with `u[m] = (a[2m], a[2m+1])`, and the original's reduction tree
 `b0 = (a0+a4)+(a8+a12)` falls out as `(u0+u2)+(u4+u6)` lanewise, associated in the same
 order, so `vaddvq_f64` of that is exactly `b0+b1`. Same arithmetic, same rounding, same
-bits - which the [logits comparison](#1-byte-identical-logits) then confirms end to end.
-
-![The instruction mix is identical: 8, 8 and 4 vector FMAs either way](docs/images/fma_instruction_mix.png)
+bits - which the [logits comparison](#1-byte-identical-logits) then confirms end to end,
+and which the [instruction counts](#4-codegen-parity) confirm at the disassembly.
 
 ### 2. Scratch disjointness is enforced, not documented
 
@@ -319,6 +320,29 @@ Not "similar" - identical, and tested:
 
 ![Per-kernel fixtures, three oracle gates, then a byte-compare against the C build](docs/images/verification-ladder.png)
 
+**It is the C project's suite, not a new one.** `fixtures/` is a verbatim copy of the
+reference's `tests/fixtures/` - `diff -rq` between the two trees is clean - so the oracle
+targets are the same integers, not merely equivalent ones. Each C test binary has one Rust
+counterpart, and the same two are gated on a real checkpoint in both projects:
+
+```text
+C `make test`      Rust `cargo test`   fixture
+test_ops           ops.rs              fixtures/ops           per-kernel, from pure torch
+test_cache         cache.rs            fixtures/cache
+test_st            st.rs               fixtures/st            two synthetic shards
+test_cfg           cfg.rs              fixtures/cfg           one accept, three refusals
+test_tok           tok.rs              -                      gated: needs tiktoken.model
+scale_test         scale.rs            -                      real 93-layer dimensions
+k3_model           model_oracle.rs     fixtures/ref_k3.json   the three gates below
+test_real_layer    real_layer.rs       -                      gated: K3_SHARD_DIR
+test_expert        expert.rs           -                      gated: K3_SHARD_DIR
+-                  bind_names.rs       -                      added here; see finding 4
+```
+
+Neither project loads the 1.56 TB checkpoint to test. The C target says so in its own last
+line, `ALL WEIGHTLESS TESTS PASSED`. What stands in for the real model is a complete but
+tiny one, and [finding 4](#things-the-port-turned-up) is what that costs.
+
 ### 1. Byte-identical logits
 
 The strongest check. The tiny-model oracle's final-position logits, dumped from both
@@ -342,9 +366,12 @@ that patch is not committed to the original.
 
 ### 2. The three oracle gates
 
-13 layers, hidden 128, vocab 256 - thirteen because attention residuals work in blocks of
-twelve and their failure modes need two complete blocks and a third in progress. All three
-gates exact, and the same verdict from the C binary on the same fixtures:
+13 layers, hidden 128, vocab 256, 628 tensors. Thirteen is not arbitrary: at the tiny
+model's `attn_res_block_size` of 3 it puts attention-residual boundaries at layers 0, 3, 6,
+9 and 12, which is five snapshots and four complete blocks - enough for the failure modes
+that only appear once blocks close. The released model gets the same structure from 93
+layers at block size 12. All three gates exact, and the same verdict from the C binary on
+the same fixtures:
 
 ```text
 GATE 1  teacher forcing : 32/32 positions match tf_pred
@@ -382,15 +409,67 @@ scalar fmadd    3     3
 Both builds on one machine (Apple M5, 10 cores), at their real settings: C with
 `clang -O3 -mcpu=native -ffp-contract=off` and OpenMP through libomp, Rust with
 `opt-level = 3`, thin LTO and rayon. Thread count pinned per run with `OMP_NUM_THREADS` and
-`RAYON_NUM_THREADS`. Every number is the median of five runs of a benchmark that itself does
-one warm call plus five timed ones. Raw data: [`docs/data/perf-sweep.csv`](docs/data/perf-sweep.csv).
+`RAYON_NUM_THREADS`. Every number is a median of five runs.
+
+### The whole engine
+
+Two matmuls are not an engine. This runs the complete decode loop - the KDA recurrence,
+gated MLA with a KV cache, the attention-residual stack, the router, MXFP4 experts streamed
+through the LRU cache - and times the part a user waits on.
+
+The released checkpoint is 1.56 TB, which is a disk problem rather than a memory one and is
+not available here. So the measurement runs a synthetic checkpoint with the same layer mix
+and the same kernel shapes at hidden size 2048: 13 layers, 9 KDA, 4 MLA, one dense, twelve
+MoE, eight routed experts each. Weights are random, because what is being compared is
+arithmetic throughput and not model quality.
+
+**Both binaries read the same bytes and emit identical token ids**, which the harness
+asserts before reporting any timing. Per-step seconds come from the engine's own STEP table,
+so checkpoint load is excluded, and step 0 is dropped because prefill scales with the prompt
+rather than with one token.
+
+![Seconds per token, C against Rust, at one two four and ten threads](docs/images/end_to_end.png)
+
+```text
+threads      C s/tok    Rust s/tok    speedup
+      1       0.0951        0.0687      1.38x
+      2       0.0589        0.0476      1.24x
+      4       0.0529        0.0453      1.17x
+     10       0.0550        0.0480      1.14x
+```
+
+The gap narrows with thread count because both builds hit the same memory wall; by four
+threads neither is arithmetic-bound. Raw data:
+[`docs/data/end-to-end.csv`](docs/data/end-to-end.csv). Reproduce with
+`tools/gen_bench_model.py` then `tools/bench_end_to_end.py`.
+
+**Do not carry this ratio over to the released checkpoint.** Everything above is resident in
+RAM. The real engine is not: it is 93 layers at hidden 7168 streamed from disk, and the
+reference's own 12-rung ladder puts 40.9-60.6% of wall clock in storage waits
+([`memory-ladder.tsv`](https://github.com/FareedKhan-dev/kimi-k3-in-c/blob/main/docs/data/memory-ladder.tsv)).
+No language touches that half. Amdahl on the arithmetic half only:
+
+```text
+I/O share of a real token    1.38x arithmetic    1.14x arithmetic
+                    40.9%               1.19x               1.08x
+                    60.6%               1.12x               1.05x
+```
+
+So the defensible claim is narrow: **the port does not pay for its safety on the hot path,
+and is somewhat ahead of the C build on arithmetic.** On the real model that would land
+nearer 1.05-1.19x, and the disk would still be the thing to fix first.
+
+Peak RSS is at parity - 2.02 GB against 2.01 GB on this model, measured the same run.
+
+### The two hot kernels
 
 **The two builds are shown to be doing the same work first.** Both benchmarks fill inputs
 from the same xorshift32 with the same seeds, and hashing the output vectors gives
 `6c14a49941ce86d9` (bf16) and `a231061237b5579d` (mxfp4) on both sides. Without that check a
-timing comparison is comparing two workloads.
+timing comparison is comparing two workloads. Raw data:
+[`docs/data/perf-sweep.csv`](docs/data/perf-sweep.csv).
 
-![The same two kernels in both languages, at one core and at ten](docs/images/rust_vs_c_kernels.png)
+![Rust speedup over C per kernel, against a parity line](docs/images/rust_vs_c_kernels.png)
 
 ```text
                      one core                    all 10 cores
@@ -401,8 +480,9 @@ MXFP4 matmul  C   2.39 ms   9.2 GFLOP/s     C  0.56 ms  39.4 GFLOP/s
 3072 x 3584   R   2.42 ms   9.1 GFLOP/s     R  0.57 ms  38.6 GFLOP/s    a tie
 ```
 
-MXFP4 ties, which is what an identical instruction mix predicts. bf16 is about 2x faster in
-Rust and **is already 2x at one core**, so it is not a threading effect:
+MXFP4 lands on parity, which is what an identical instruction mix predicts and is the result
+that should be there. bf16 is the one that moves, **and it is already 2x at one core**, so it
+is not a threading effect:
 
 ![Throughput against thread count, both builds at their real settings](docs/images/perf_kernel_scaling.png)
 
@@ -434,12 +514,9 @@ in C would close it. What the measurement does establish is that the port carrie
 overhead on the hot path - identical arithmetic, and the one divergence traceable to a single
 instruction-selection choice.
 
-One caveat, because these numbers are easy to over-read. End to end on the 13-layer tiny
-model, single-threaded, C is faster: 0.166 s against 0.312 s. At hidden size 128 the
-per-call dispatch overhead dominates the arithmetic completely, and both builds are
-pathological there - with 10 threads each takes over a second, seven times worse than one.
-The kernel benchmark above runs at the real model's dimensions, which is the regime that
-matters.
+The engine-level 1.14-1.38x above is the same effect, diluted: bf16 matmul is a large share
+of the trunk but not all of a token, and the rest - the KDA recurrence, the router, the
+expert dequantisation - is code where the two builds agree instruction for instruction.
 
 ---
 
@@ -461,6 +538,22 @@ Findings worth passing back upstream:
    `layer_kda` case that left the KDA gate weight unwired because `g` and `o` are shared
    struct fields. Recorded because "the test was wrong" is the failure mode that quietly
    erodes a suite.
+4. **A weightless suite cannot see a name bug, and this one shipped.** The C source spells
+   every layer tensor as `PRE "layers.%d.input_layernorm.weight"`, splicing the
+   `language_model.model.` prefix into the string literal at each of its 39 call sites. That
+   is correct by construction. This port hoisted the prefix into one `fmt_name` helper and
+   then did not apply it, so the binder asked the checkpoint for
+   `layers.0.input_layernorm.weight` and **could not bind a single layer of the real
+   model.** Every test passed anyway: `model_oracle` builds its own weight store with the
+   tiny model's fixture names and never calls the binder at all, and the only two tests that
+   do - `real_layer` and `expert` - are gated on `K3_SHARD_DIR` in both projects. A
+   refactor that is safe in isolation became a single point of failure with no ungated test
+   under it. [`tests/bind_names.rs`](tests/bind_names.rs) now closes that: it drives the
+   real planner against a shard set holding no layer tensors and asserts the name it asks
+   for, across the KDA, MLA, dense and MoE branches.
+5. **`now_s()` measured nothing.** It returned `Instant::now().elapsed()`, which is the time
+   taken to read the clock, so every duration the CLI printed was zero. The C original takes
+   `clock_gettime(CLOCK_MONOTONIC)` deltas against a start captured earlier.
 
 ---
 
