@@ -25,10 +25,16 @@ const PRE: &str = "language_model.model.";
 
 /// A scratch shard set holding one tensor that is not part of any layer, so `St::open`
 /// succeeds and every layer lookup misses. Written under `target/`, never `fixtures/`.
-fn scratch_shards() -> PathBuf {
+///
+/// `who` MUST be unique per test. Cargo runs the tests in one binary concurrently, and a
+/// shared path here is a real race: one test read the file while the other was still
+/// writing it and got "too short for a header length". Separate directories remove the
+/// sharing rather than synchronising it.
+fn scratch_shards(who: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target")
-        .join("bind_names_test");
+        .join("bind_names_test")
+        .join(who);
     std::fs::create_dir_all(&dir).expect("mkdir scratch");
 
     let header = br#"{"unrelated.tensor":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
@@ -65,7 +71,7 @@ fn first_requested_name(st: &St, c: &Cfg, layer: usize) -> String {
 
 #[test]
 fn every_layer_branch_requests_fully_qualified_names() {
-    let st = St::open(&scratch_shards()).expect("open scratch shards");
+    let st = St::open(&scratch_shards("layer")).expect("open scratch shards");
     let c = tiny_cfg();
 
     // The tiny config is 13 layers: first_k_dense_replace = 1 makes layer 0 dense, and
@@ -95,7 +101,7 @@ fn every_layer_branch_requests_fully_qualified_names() {
 fn model_level_names_are_fully_qualified() {
     // The model-level planner builds its names with `PRE` inline rather than through
     // `fmt_name`, so it never carried the bug; this pins that it stays that way.
-    let st = St::open(&scratch_shards()).expect("open scratch shards");
+    let st = St::open(&scratch_shards("model")).expect("open scratch shards");
     let c = tiny_cfg();
     let err = match bind::ModelBind::load(&st, &c, true) {
         Ok(_) => panic!("a shard set with no model tensors must fail to plan"),
