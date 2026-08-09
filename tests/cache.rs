@@ -184,7 +184,7 @@ fn streaming_expert_cache() {
     };
     let nslot = cache.stats().nslot;
     t.ck(
-        nslot >= topk + 1 && nslot < NE,
+        nslot > topk && nslot < NE,
         "cache under pressure",
         &format!("{nslot} slots for {NE} experts, top-{topk}"),
     );

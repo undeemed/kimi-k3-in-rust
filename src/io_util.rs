@@ -89,6 +89,11 @@ impl AlignedBuf {
     pub fn len(&self) -> usize {
         self.len
     }
+
+    /// True when this buffer exposes no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 }
 
 impl Deref for AlignedBuf {

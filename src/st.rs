@@ -205,7 +205,7 @@ impl St {
                     )
                 })?;
 
-                let t = build_tensor(&entry, name, shard, base, path)?;
+                let t = build_tensor(entry, name, shard, base, path)?;
 
                 // Consistency: the byte span must equal elements times element size. A
                 // mismatch means the shape and the data disagree, and every later read

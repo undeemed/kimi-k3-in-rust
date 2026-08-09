@@ -21,6 +21,10 @@
 //! recurrent state and an MLA KV cache. GATE 3 of the tiny-model oracle requires it to
 //! produce the SAME tokens as full recompute.
 
+// Same rationale as `src/lib.rs`: the CLI's forward path mirrors `k3_run.c` argument for
+// argument and index for index, so the two can be diffed line by line.
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+
 use k3::bind::{self, LayerBind, ModelBind};
 use k3::cache::Cache;
 use k3::cfg::{self, Cfg, KV_BYTES_PER_POS, MAX_GEN, MAX_PROMPT};
@@ -169,8 +173,8 @@ fn preset_list<W: Write>(f: &mut W) {
     }
     let _ = writeln!(
         f,
-        "  {:<12} {:>6} / {:<6}  {}",
-        "auto", "fit", "fit", "sizes both from this machine's free RAM, trunk-first. Recommended."
+        "  {:<12} {:>6} / {:<6}  sizes both from this machine's free RAM, trunk-first. Recommended.",
+        "auto", "fit", "fit"
     );
     let _ = writeln!(
         f,
@@ -685,7 +689,6 @@ fn spec_draft(seq: &[i32], t_len: usize, cap: usize, out: &mut [i32]) -> usize {
             continue;
         }
         let m1 = m1 as usize;
-        let m2 = m2 as i32;
         let mut nd = 0usize;
         let mut i = 0;
         while nd < cap && m1 + n + i < t_len {
@@ -1620,7 +1623,6 @@ fn run() -> i32 {
     let kper_p = (c.kda_heads * c.kda_head_dim) as usize;
     let kper_f = kper_p * c.kda_head_dim as usize + 3 * kper_p * (c.conv_k as usize - 1);
     let mut spec_snap: Option<Vec<f32>> = None;
-    let mut spec_n = spec_n;
     if spec_n > 0 {
         if !incremental {
             eprintln!("--spec needs --incremental; ignoring --spec");
@@ -1748,8 +1750,8 @@ fn run() -> i32 {
     }
 
     println!(
-        "{:<6} {:<10} {:<12} {:<10} {:<10} {}",
-        "STEP", "TOKEN", "SECONDS", "CACHE HIT", "READ GB", "TOK/S"
+        "{:<6} {:<10} {:<12} {:<10} {:<10} TOK/S",
+        "STEP", "TOKEN", "SECONDS", "CACHE HIT", "READ GB"
     );
     println!("--------------------------------------------------------------------");
     let mut t_total = 0.0f64;
@@ -1814,7 +1816,7 @@ fn run() -> i32 {
             let mut nd = 0usize;
             if spec_snap.is_some()
                 && t_len + spec_n as usize + 1 < tmax
-                && base + spec_n as usize + 1 <= w.kv_cap
+                && base + (spec_n as usize) < w.kv_cap
             {
                 if dw.trunk.is_some() {
                     // The draft model proposes: sequential one-token steps through the draft
@@ -1860,9 +1862,7 @@ fn run() -> i32 {
                     .as_mut()
                     .unwrap()
                     .copy_from_slice(&ks[..kper_f * w.n_bound]);
-                for i in 0..nd {
-                    seq[t_len + i] = d[i];
-                }
+                seq[t_len..t_len + nd].copy_from_slice(&d[..nd]);
                 frc_ok = forward(
                     &mut w,
                     &c,
@@ -1981,8 +1981,9 @@ fn run() -> i32 {
                     emitn += 1;
                 }
                 // keep the draft in lockstep through non-drafted steps
-                if dw.trunk.is_some() && frc_ok {
-                    if forward(
+                if dw.trunk.is_some()
+                    && frc_ok
+                    && forward(
                         &mut dw,
                         &c,
                         &mut cache,
@@ -1996,9 +1997,8 @@ fn run() -> i32 {
                         None,
                     )
                     .is_ok()
-                    {
-                        dw.cached = base + 1;
-                    }
+                {
+                    dw.cached = base + 1;
                 }
             }
         } else {
@@ -2197,11 +2197,7 @@ fn run() -> i32 {
                 io_s - t_total
             );
         }
-        let retained = if expert_reqs_total > expert_evict_total {
-            expert_reqs_total - expert_evict_total
-        } else {
-            0
-        };
+        let retained = expert_reqs_total.saturating_sub(expert_evict_total);
         println!("  experts, whole run: {:.2} GB read | {} of {} requests retained in RAM ({:.2}%) | {} evictions",
             expert_gb_total, retained, expert_reqs_total,
             if expert_reqs_total > 0 { 100.0 * retained as f64 / expert_reqs_total as f64 } else { 0.0 },

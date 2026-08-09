@@ -7,6 +7,7 @@
 <p>Kimi K3, 2.78 trillion parameters, on one CPU.<br>Byte-identical output to the C original, verified on the same machine.</p>
 
 <p>
+<a href="../../actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/undeemed/kimi-k3-in-rust/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License"></a>
 <a href="Cargo.toml"><img src="https://img.shields.io/badge/Rust-1.83+-orange?style=flat-square" alt="Rust"></a>
 <a href="#platforms"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20x86--64%20%7C%20arm64-lightgrey?style=flat-square" alt="Platform"></a>
@@ -487,10 +488,17 @@ the unicode tables formatted one entry per line. None of it is abstraction.
 ```bash
 cargo test --release       # 43 tests, no weights, no network, no Python
 cargo bench                # the kernel benchmark, same shapes as the C one
-cargo clippy --all-targets # zero warnings
+cargo clippy --all-targets -- -D warnings    # zero warnings is the gate
 cargo fmt
 K3_SHARD_DIR=/path cargo test --release -- --ignored   # the two checkpoint-gated tests
 ```
+
+[CI](.github/workflows/ci.yml) runs three jobs on every push. The weightless suite on
+ubuntu x86-64 and macOS arm64, so both dispatch paths get exercised. `fmt` and
+`clippy -D warnings`. And a **bit-identity job** that clones the C reference at the pinned
+commit, builds it, runs both tiny-model oracles and byte-compares the logits - so the
+exactness claim in this README is checked by machine on every commit rather than asserted
+once.
 
 [`docs/images/`](docs/images/) holds the figure set with the Python and Mermaid generators
 that produce it, and its README separates the figures measured here from the ones inherited

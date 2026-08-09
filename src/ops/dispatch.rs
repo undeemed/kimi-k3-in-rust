@@ -159,7 +159,7 @@ fn dot_q8(row: &[u8], x: &[f32]) -> f32 {
 /// is `in/2` bytes per row, `scales` is `ceil(in/group)` bytes per row. k3_ops.c:1256.
 #[inline(always)]
 fn dot_mxfp4(packed: &[u8], scales: &[u8], x: &[f32], input: usize, group: usize) -> f64 {
-    let ngrp = (input + group - 1) / group;
+    let ngrp = input.div_ceil(group);
     let gbyte = group / 2;
     let mut acc = 0.0f64;
 
@@ -171,7 +171,7 @@ fn dot_mxfp4(packed: &[u8], scales: &[u8], x: &[f32], input: usize, group: usize
         let n = core::cmp::min(input - g * group, group);
         // Slice both operands to exactly the group once, so the expansion and the dot
         // product below carry no per-element bounds check.
-        let pb = &packed[g * gbyte..g * gbyte + (n + 1) / 2];
+        let pb = &packed[g * gbyte..g * gbyte + n.div_ceil(2)];
         let xg = &x[g * group..g * group + n];
 
         // Expand the group to floats first, then a plain dot product: a table lookup in
@@ -490,7 +490,7 @@ mod neon {
     /// Eight scalar accumulators become four vectors, `t[m] = (s[2m], s[2m+1])`. Then
     /// `t0+t2` is `(b0, b1)` and `t1+t3` is `(b2, b3)`, matching the scalar tree.
     pub fn dot_mxfp4(packed: &[u8], scales: &[u8], x: &[f32], input: usize, group: usize) -> f64 {
-        let ngrp = (input + group - 1) / group;
+        let ngrp = input.div_ceil(group);
         let gbyte = group / 2;
         let mut acc = 0.0f64;
         for g in 0..ngrp {
@@ -499,7 +499,7 @@ mod neon {
                 continue;
             }
             let n = core::cmp::min(input - g * group, group);
-            let pb = &packed[g * gbyte..g * gbyte + (n + 1) / 2];
+            let pb = &packed[g * gbyte..g * gbyte + n.div_ceil(2)];
             let xg = &x[g * group..g * group + n];
             let wf = expand_group(pb, n);
 

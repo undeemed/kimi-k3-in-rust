@@ -533,7 +533,7 @@ impl Trunk {
         // Streaming. Wait for an in-flight prefetch of this layer. k3_trunk.c:471.
         let prefetched = self.io_wait(layer);
         if prefetched < 0 {
-            return Err(Error::new(ErrorKind::Other, "k3_trunk: async read failed"));
+            return Err(Error::other("k3_trunk: async read failed"));
         }
 
         let slot = if prefetched > 0 {

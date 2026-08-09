@@ -285,7 +285,7 @@ pub fn load(dir: &Path) -> Result<Tok> {
         });
     }
     // longest match first, so "<|end_of_msg|>" wins over any prefix of it
-    sp.sort_by(|a, b| b.str_.len().cmp(&a.str_.len()));
+    sp.sort_by_key(|s| std::cmp::Reverse(s.str_.len()));
     t.sp = sp;
 
     // EOS: read the standard HuggingFace `eos_token` field and resolve it through
@@ -320,7 +320,7 @@ pub fn load(dir: &Path) -> Result<Tok> {
 /// Raw token bytes -> the byte-level string `Tok` hashes on. Port of
 /// `k3_bytelevel` (k3_tok.h:97). `out` must hold `2*n+1`. Returns the string
 /// length.
-fn bytelevel(t: &Tok, b: &[u8], out: &mut Vec<u8>) -> usize {
+fn bytelevel(t: &Tok, b: &[u8], out: &mut [u8]) -> usize {
     let mut o = 0;
     for &bb in b {
         let bb = bb as usize;

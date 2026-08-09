@@ -205,21 +205,19 @@ impl Tok {
             while i + 1 < ns {
                 let ll = slen[i];
                 let rl = slen[i + 1];
-                let rk;
-                if self.rankbpe {
+                let rk = if self.rankbpe {
                     // tiktoken: rank of the CONCATENATION (contiguous in s)
-                    rk = self
-                        .vocab
+                    self.vocab
                         .get(&s[soff[i]..soff[i] + ll + rl])
                         .copied()
-                        .unwrap_or(-1);
+                        .unwrap_or(-1)
                 } else {
                     let mut kbuf = Vec::with_capacity(ll + 1 + rl);
                     kbuf.extend_from_slice(&s[soff[i]..soff[i] + ll]);
                     kbuf.push(0);
                     kbuf.extend_from_slice(&s[soff[i + 1]..soff[i + 1] + rl]);
-                    rk = self.merges.get(&kbuf).copied().unwrap_or(-1);
-                }
+                    self.merges.get(&kbuf).copied().unwrap_or(-1)
+                };
                 if rk >= 0 && rk < best {
                     best = rk;
                     bp = i as isize;
@@ -321,15 +319,13 @@ impl Tok {
                         j = usize::MAX; // sentinel: -1
                     }
                 }
-                if j != usize::MAX {
-                    if unicode::is_l(cp[j]) {
-                        while j < n && unicode::is_l(cp[j]) {
-                            j += 1;
-                        }
-                        i = j;
-                        self.bpe_piece(p, off[start], off[i], out, max);
-                        continue;
+                if j != usize::MAX && unicode::is_l(cp[j]) {
+                    while j < n && unicode::is_l(cp[j]) {
+                        j += 1;
                     }
+                    i = j;
+                    self.bpe_piece(p, off[start], off[i], out, max);
+                    continue;
                 }
             }
             // 3) \p{N}{1,3}

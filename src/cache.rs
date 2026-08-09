@@ -92,12 +92,21 @@ unsafe impl Send for SlotWriter {}
 unsafe impl Sync for SlotWriter {}
 
 impl SlotWriter {
+    /// The base of one slot.
+    ///
+    /// This deliberately returns a raw pointer rather than a `&mut [u8]`. A method taking
+    /// `&self` and returning `&mut` would invent a mutable borrow out of a shared one, so
+    /// two tasks holding the same `&SlotWriter` could each obtain a `&mut` to the same
+    /// bytes with nothing in the type system objecting. The aliasing here is legitimate,
+    /// but the argument for it is the phase-1 reservation, which lives at the call site -
+    /// so the call site is where the slice is built and where the argument is written down.
+    ///
     /// # Safety
     ///
     /// `slot` must be a slot index that phase 1 reserved for this task and handed to no
     /// other task, and `slot * slot_bytes + slot_bytes` must be within the arena.
-    unsafe fn slot(&self, slot: usize) -> &mut [u8] {
-        std::slice::from_raw_parts_mut(self.base.add(slot * self.slot_bytes), self.slot_bytes)
+    unsafe fn slot_ptr(&self, slot: usize) -> *mut u8 {
+        self.base.add(slot * self.slot_bytes)
     }
 }
 
@@ -366,11 +375,7 @@ impl<'a> Cache<'a> {
         // from disk moments earlier is resident by the time get() asks, so it counts as a
         // hit. Report what was actually served from RAM without touching the disk.
         if self.prefetch_reads != 0 {
-            let served = if self.hits > self.prefetch_reads {
-                self.hits - self.prefetch_reads
-            } else {
-                0
-            };
+            let served = self.hits.saturating_sub(self.prefetch_reads);
             // Two calls, one line each: the C printf embeds the newline mid-literal and
             // aligns the continuation under "came" with 18 leading spaces. k3_cache.c:415.
             println!(
@@ -558,10 +563,7 @@ impl<'a> Cache<'a> {
         let t0 = Instant::now();
         let sb = self.slot_bytes as usize;
         let dst = &mut self.arena[slot * sb..slot * sb + sb];
-        let (got, pad) = match crate::load::expert_load_direct(self.st, &r, dst) {
-            Ok(gp) => gp,
-            Err(_) => (-1, 0),
-        };
+        let (got, pad) = crate::load::expert_load_direct(self.st, &r, dst).unwrap_or((-1, 0));
         self.load_seconds += t0.elapsed().as_secs_f64();
         if got != r.nbytes {
             eprintln!(
@@ -689,7 +691,7 @@ impl ExpertSrc for Cache<'_> {
         // sorting by where the bytes actually live turns a scattered set of seeks into a
         // mostly forward sweep. A stable sort by (shard, off) is exactly the permutation
         // the C insertion sort produces. k3_cache.c:161.
-        w.sort_by(|a, b| (a.r.shard, a.r.off).cmp(&(b.r.shard, b.r.off)));
+        w.sort_by_key(|a| (a.r.shard, a.r.off));
 
         // ---- phase 2: read, concurrently ----
         let t0 = Instant::now();
@@ -710,11 +712,10 @@ impl ExpertSrc for Cache<'_> {
                 // cannot reach these bytes. The arena outlives the parallel region because
                 // it is owned by `self`, which is borrowed for the whole call. This is the
                 // same argument the C source makes at k3_cache.c:107-124.
-                let dst = unsafe { writer.slot(it.slot) };
-                let (got, pad) = match crate::load::expert_load_direct(st, &it.r, dst) {
-                    Ok(gp) => gp,
-                    Err(_) => (-1, 0),
+                let dst = unsafe {
+                    std::slice::from_raw_parts_mut(writer.slot_ptr(it.slot), writer.slot_bytes)
                 };
+                let (got, pad) = crate::load::expert_load_direct(st, &it.r, dst).unwrap_or((-1, 0));
                 it.got = got;
                 it.pad = pad;
             });

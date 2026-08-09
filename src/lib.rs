@@ -57,6 +57,25 @@
 //! getting it wrong. Anyone adding a chunked KDA path must reinstate them here together
 //! with the fixtures that gate them.
 
+// These three lints fight the port's reason for existing, so they are silenced once here
+// rather than per item.
+//
+// - `needless_range_loop`: the numeric kernels are a statement-for-statement translation of
+//   the C source, and the index loops are how they stay diffable against it. `for i in 0..n`
+//   next to `for (i = 0; i < n; i++)` is the property that lets a reviewer check the two
+//   line by line; iterator chains would break that and, where several arrays are indexed by
+//   the same counter, would also reorder the reads.
+// - `too_many_arguments`: the kernel signatures mirror the C API in `include/k3/k3.h`,
+//   argument for argument. Bundling them into structs would make the two headers disagree.
+// - `type_complexity`: the resolver callbacks in `bind` are the C `const void *` +
+//   out-parameter idiom expressed in the type system; naming each one would add an alias
+//   used exactly twice.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+
 pub mod bind;
 pub mod cache;
 pub mod cfg;

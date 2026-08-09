@@ -7,6 +7,11 @@
 //! assert the dtype, shape, numel, and a prefix/suffix of the widened f32 values for each
 //! of the six named cases, plus the round-trip and ghost-name semantics the C test checks.
 
+// The expected values are the FULL decimal expansions `tools/verify_st.py` prints for the
+// same fixture bytes, kept verbatim so the two can be compared by eye. They already parse
+// to the exact f32 asserted here; shortening them would only make the comparison harder.
+#![allow(clippy::excessive_precision)]
+
 use std::path::Path;
 
 use k3::st::{Dtype, St};

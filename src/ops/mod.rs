@@ -580,7 +580,7 @@ pub fn matmul_mxfp4(
 ) {
     let dot = dispatch::kernels().mxfp4;
     let pcols = input / 2;
-    let ngrp = (input + group - 1) / group;
+    let ngrp = input.div_ceil(group);
     let body = |r: usize, yr: &mut f32| {
         *yr = unsafe {
             dot(
@@ -621,7 +621,7 @@ pub fn mxfp4_dequant(
     group: usize,
 ) {
     let width = pcols * 2;
-    let ngrp = (width + group - 1) / group;
+    let ngrp = width.div_ceil(group);
 
     for r in 0..rows {
         let pr = &packed[r * pcols..(r + 1) * pcols];
@@ -1441,8 +1441,7 @@ pub fn kda_layer(
     }
 
     // 2. ShortConv with fused SiLU, carrying state across calls
-    let mut state = state;
-    let (s_recur, conv_state) = match state.as_deref_mut() {
+    let (s_recur, conv_state) = match state {
         Some(s) => {
             let (a, b) = s.split_at_mut(h_count * d * d);
             (Some(a), Some(b))

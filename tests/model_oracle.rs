@@ -12,6 +12,10 @@
 //! All three gates must be EXACT. The final-position logits are dumped as raw
 //! little-endian f32 to `target/rust_logits.bin` for byte-comparison against a C dump.
 
+// This harness mirrors `tests/unit/k3_model.c` statement for statement: the index loops
+// and the wide per-layer signatures are what keep the two diffable side by side.
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+
 use k3::cfg::Cfg;
 use k3::ops::{
     self, attn_res, decoder_layer, decoder_layer_inc, layer_scratch, rmsnorm, Attn, KdaW, LayerW,

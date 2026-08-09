@@ -1,12 +1,87 @@
+kimi-k3-in-rust
+Copyright 2026 the kimi-k3-in-rust authors
+
+This product includes software developed as part of this project, licensed under the
+Apache License, Version 2.0.
+
+================================================================================
+DERIVATIVE WORK
+================================================================================
+
+This repository is a Rust port of, and therefore a derivative work of:
+
+  kimi-k3-in-c
+  Copyright 2026 the kimi-k3-in-c authors
+  https://github.com/FareedKhan-dev/kimi-k3-in-c
+  Licensed under the Apache License, Version 2.0
+  Ported from commit ff11dce858a2eb8a781224facdffd33a1fa48d25
+
+The upstream NOTICE is reproduced in full at the end of this file, as required by
+section 4(d) of the Apache License.
+
+WHAT WAS TAKEN FROM UPSTREAM
+
+  The algorithm, the numeric contract and the module structure. Every kernel in
+  src/ops/ is a translation of src/core/k3_ops.c, and the same is true of src/st.rs,
+  src/load.rs, src/trunk.rs, src/cache.rs, src/bind.rs, src/cfg.rs, src/tok/ and
+  src/main.rs against their C counterparts. The floating-point evaluation order, the
+  reduction trees, the tensor-name templates, the on-disk state format and the CLI
+  surface are all upstream's design.
+
+  fixtures/                     verbatim copy of upstream tests/fixtures/, including
+                                the tiny-model oracle checkpoint and the per-kernel
+                                reference outputs
+  tools/tok_parity.py           verbatim
+  tools/cmp_logits.py           verbatim
+  tools/_paths.py               verbatim
+  docs/images/_plots.py         the style helpers (style, bare, lollipop, save and the
+                                colour palette) are derived from upstream
+                                docs/images/_plots.py; the seven figures this file
+                                renders are original to this port
+  src/tok/                      a Rust transcription of upstream third_party/tok.h,
+                                third_party/tok_unicode.h and
+                                third_party/tok_unicode_o200k.h, which upstream had in
+                                turn vendored from external projects (see the upstream
+                                NOTICE below for their modification history), together
+                                with src/tokenizer/k3_tok.h, which is upstream's own work
+
+WHAT IS ORIGINAL TO THIS PORT
+
+  The Rust implementation itself, including the explicit NEON and AVX2 kernels in
+  src/ops/dispatch.rs and their lane derivations, the borrow-checked scratch carving,
+  the WMat/Attn/ExpertSrc type surface, the test suite in tests/, benches/kernels.rs,
+  the C-against-Rust measurements in docs/data/perf-sweep.csv and the figures in
+  docs/images/.
+
+NOT INCLUDED HERE
+
+  Upstream's docs/ prose and its docs/data/ measurement captures, which were taken on
+  upstream's hardware. Upstream's docs/kimi-k3-tech-report.pdf. Upstream's 115 figures
+  explaining the model. Read all of these in the upstream repository.
+
+================================================================================
+MODEL WEIGHTS
+================================================================================
+
+This repository contains no model weights.
+
+Kimi K3 is released by Moonshot AI under its own license. Obtain the weights from the
+official distribution and comply with that license; nothing here grants any rights to
+them.
+
+================================================================================
+UPSTREAM NOTICE, reproduced in full
+================================================================================
+
 kimi-k3-in-c
 Copyright 2026 the kimi-k3-in-c authors
 
 This product includes software developed as part of this project, licensed under the
 Apache License, Version 2.0.
 
-================================================================================
+--------------------------------------------------------------------------------
 THIRD-PARTY COMPONENTS
-================================================================================
+--------------------------------------------------------------------------------
 
 The following files under third_party/ are vendored from external projects. They remain
 under their original licenses and copyrights, and are licensed to this project under the
@@ -41,9 +116,9 @@ MODIFICATIONS
   structures directly from the released tiktoken.model and tokenizer_config.json, so no
   intermediate tokenizer.json conversion step is required.
 
-================================================================================
+--------------------------------------------------------------------------------
 MODEL WEIGHTS
-================================================================================
+--------------------------------------------------------------------------------
 
 This repository contains no model weights.
 

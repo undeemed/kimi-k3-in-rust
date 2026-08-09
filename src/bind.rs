@@ -300,7 +300,7 @@ impl LayerPlan {
                     }
                     let dst = &mut widen[w..w + need];
                     let rp = &run[s.off as usize..];
-                    let rowb = (4 + cols as usize) as usize;
+                    let rowb = 4 + cols as usize;
                     for r in 0..rows as usize {
                         let scale = f32::from_le_bytes([
                             rp[r * rowb],

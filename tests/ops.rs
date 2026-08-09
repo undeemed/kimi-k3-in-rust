@@ -12,6 +12,11 @@
 //! skipped case is a failure, exactly as the C harness counts a skip as a non-zero exit;
 //! no test here skips.
 
+// The kernels under test are a statement-for-statement port of the C source, and this
+// harness mirrors `tests/unit/test_ops.c` the same way: the index loops and the wide
+// fixture-driven signatures are what keep the two diffable side by side.
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+
 mod support;
 use support::{
     arr, arr_u8, assert_abs_max, assert_close, boolean, num_f32, num_i32, shape, Fixtures,
@@ -318,7 +323,7 @@ fn router_case() {
         for a in 0..k {
             let mut found = false;
             for b in 0..k {
-                if eidx[(rw * k + b) as usize] as i32 == gi[a] {
+                if eidx[rw * k + b] as i32 == gi[a] {
                     found = true;
                     break;
                 }
@@ -334,11 +339,11 @@ fn router_case() {
         // match weights by expert id, since order is unspecified
         for a in 0..k {
             for b in 0..k {
-                if eidx[(rw * k + b) as usize] as i32 != gi[a] {
+                if eidx[rw * k + b] as i32 != gi[a] {
                     continue;
                 }
-                let d = (gw[a] as f64 - ewt[(rw * k + b) as usize] as f64).abs();
-                let tol = f.atol + f.rtol * (ewt[(rw * k + b) as usize] as f64).abs();
+                let d = (gw[a] as f64 - ewt[rw * k + b] as f64).abs();
+                let tol = f.atol + f.rtol * (ewt[rw * k + b] as f64).abs();
                 if d / tol > worst_w {
                     worst_w = d / tol;
                 }
@@ -374,9 +379,8 @@ fn attnres_case() {
     let mut y = vec![0.0f32; rows * n];
     for rw in 0..rows {
         for b in 0..nblk {
-            src[b * n..(b + 1) * n].copy_from_slice(
-                &br[((rw * nblk + b) as usize) * n..((rw * nblk + b + 1) as usize) * n],
-            );
+            src[b * n..(b + 1) * n]
+                .copy_from_slice(&br[(rw * nblk + b) * n..(rw * nblk + b + 1) * n]);
         }
         src[nblk * n..(nblk + 1) * n].copy_from_slice(&px[rw * n..(rw + 1) * n]);
         attn_res(&mut y[rw * n..(rw + 1) * n], &src, &fold, nsrc, n, eps);
@@ -962,7 +966,7 @@ fn mxfp4_dequant_swap(
     group: usize,
 ) {
     let width = pcols * 2;
-    let ngrp = (width + group - 1) / group;
+    let ngrp = width.div_ceil(group);
     let e2m1 = k3::ops::dispatch::E2M1;
     let e8m0 = k3::ops::dispatch::E8M0;
     for r in 0..rows {
@@ -1109,7 +1113,7 @@ fn ref_dot_bf16(row: &[u16], x: &[f32]) -> f64 {
 /// with eight f64 lanes, reduced `(s0+s4)+(s1+s5)...`, and the group's E8M0 scale is applied
 /// as a separate multiply-then-add.
 fn ref_dot_mxfp4(packed: &[u8], scales: &[u8], x: &[f32], input: usize, group: usize) -> f64 {
-    let ngrp = (input + group - 1) / group;
+    let ngrp = input.div_ceil(group);
     let gbyte = group / 2;
     let mut acc = 0.0f64;
     for g in 0..ngrp {
@@ -1246,7 +1250,7 @@ fn dispatched_matches_plain_reference() {
     let rows_m = 70usize;
     let group = 32usize;
     let pcols = inp_m / 2;
-    let ngrp = (inp_m + group - 1) / group;
+    let ngrp = inp_m.div_ceil(group);
     let mut packed = vec![0u8; rows_m * pcols];
     let mut scales = vec![0u8; rows_m * ngrp];
     for v in &mut packed {

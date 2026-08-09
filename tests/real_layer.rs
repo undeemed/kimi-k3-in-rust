@@ -117,13 +117,9 @@ fn real_layer() {
     let dir = Path::new(&dir);
 
     let args: Vec<String> = std::env::args().collect();
-    let layer: usize = args.iter().nth(1).and_then(|s| s.parse().ok()).unwrap_or(1);
-    let t: usize = args.iter().nth(2).and_then(|s| s.parse().ok()).unwrap_or(4);
-    let cache_gb: f64 = args
-        .iter()
-        .nth(3)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2.0);
+    let layer: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let t: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4);
+    let cache_gb: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(2.0);
 
     let c = real_cfg();
     println!("Kimi K3, released weights, layer {}, T={}", layer, t);

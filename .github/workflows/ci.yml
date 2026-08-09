@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The weightless gate: per-kernel fixtures, the config guard, the safetensors reader, the
+  # expert cache, the scale test, and the 13-layer oracle that runs the whole stack. No
+  # weights, no network, no Python. Two tests are #[ignore]-gated on K3_SHARD_DIR because
+  # they need the released 1.56 TB checkpoint; they cannot run here.
+  test:
+    name: test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-latest is x86-64, macos-latest is arm64, so between them this covers both
+        # dispatch paths: AVX2 and NEON.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: which kernel path was selected
+        run: |
+          echo "arch: $(uname -m)"
+          rustc --version --verbose
+
+      - run: cargo test --release --all-targets
+
+      # The benchmark is a harness = false binary, so `cargo test` does not run it. Build and
+      # run it to be sure the kernels it exercises still link and produce their hashes.
+      - run: cargo bench
+
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+  # The port claims bit-identical output to the C original. This rebuilds the C reference at
+  # the pinned commit, runs both tiny-model oracles, and byte-compares the final-position
+  # logits. If this job goes red the exactness contract is broken, which is the one failure
+  # this project treats as unacceptable.
+  bit-identity:
+    name: logits byte-identical to the C build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: check out the C reference at the ported commit
+        run: |
+          git clone --quiet https://github.com/FareedKhan-dev/kimi-k3-in-c.git /tmp/k3c
+          cd /tmp/k3c
+          git checkout --quiet ff11dce858a2eb8a781224facdffd33a1fa48d25
+
+      - name: patch the C oracle to dump its logits
+        run: |
+          cd /tmp/k3c
+          python3 - <<'PY'
+          p = 'tests/unit/k3_model.c'
+          s = open(p).read()
+          anchor = '    printf("GATE 1  teacher forcing : %d/%d positions match tf_pred\\n", tf_all, T);'
+          assert anchor in s, 'anchor not found; the C oracle changed'
+          dump = '''    if (getenv("K3_DUMP_LOGITS")) {
+              FILE *df = fopen(getenv("K3_DUMP_LOGITS"), "wb");
+              if (df) {
+                  fwrite(lg + (size_t)(T - 1) * (size_t)c.vocab, sizeof(float), (size_t)c.vocab, df);
+                  fclose(df);
+              }
+          }
+          '''
+          open(p, 'w').write(s.replace(anchor, dump + anchor, 1))
+          PY
+
+      - name: build and run the C oracle
+        run: |
+          cd /tmp/k3c
+          make bin/k3_model
+          K3_DUMP_LOGITS=/tmp/c_logits.bin ./bin/k3_model tests/fixtures
+
+      - name: run the Rust oracle
+        run: cargo test --release --test model_oracle -- --nocapture
+
+      - name: byte-compare
+        run: |
+          ls -l /tmp/c_logits.bin target/rust_logits.bin
+          cmp /tmp/c_logits.bin target/rust_logits.bin
+          echo "logits are byte-identical"
