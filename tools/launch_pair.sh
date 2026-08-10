@@ -101,8 +101,11 @@ check)
     echo "      --service-code ec2 --quota-code L-1216C47A --desired-value 16"
     ;;
 launch)
-    say "launching two boxes, tagged $TAG"
-    for arch in arm64 x86_64; do
+    # A fresh account often sits at 5 On-Demand vCPUs, and each box wants 4, so both at
+    # once fails the second RunInstances. `launch arm64` runs one at a time.
+    WHICH="${2:-arm64 x86_64}"
+    say "launching: $WHICH (tagged $TAG)"
+    for arch in $WHICH; do
         id=$("${A[@]}" ec2 run-instances \
             --image-id "$(ami_for "$arch")" \
             --instance-type "$(inst_for "$arch")" \
@@ -154,5 +157,5 @@ kill)
     echo "terminating: $ids"
     "${A[@]}" ec2 terminate-instances --instance-ids $ids --query 'TerminatingInstances[].InstanceId' --output text
     ;;
-*)  echo "usage: $0 {check|launch|status|kill}" >&2; exit 2 ;;
+*)  echo "usage: $0 {check|launch [arm64|x86_64]|status|kill}" >&2; exit 2 ;;
 esac
