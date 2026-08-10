@@ -32,6 +32,11 @@
 # Usage:  sudo bash rent_and_run.sh [device]      # device defaults to /dev/nvme1n1
 set -euo pipefail
 
+# cloud-init runs user-data with no HOME, and `set -u` turns the rustup PATH line into a
+# fatal "HOME: unbound variable" after the toolchain has already installed. Verified on a
+# live box: this was the only unset variable the script reads.
+export HOME="${HOME:-/root}"
+
 DEV="${1:-/dev/nvme1n1}"
 MNT=/data
 REPO=https://huggingface.co/moonshotai/Kimi-K3/resolve/main
