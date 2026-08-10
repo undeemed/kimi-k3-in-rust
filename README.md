@@ -601,7 +601,7 @@ C, for reference     ~65 MB    ~130 bytes
 
 Every tensor was paying for a heap-allocated name, a heap-allocated `Vec` shape, and a
 *second* copy of the name as a `HashMap<String, _>` key. C pays for none of those: an arena
-behind an open-addressed FNV table, with an inline `int64_t shape[4]`. The fix adopts all
+behind an open-addressed FNV table (`k3_st.c:64`), with an inline `int64_t shape[4]`. The fix adopts all
 three - inline `[i64; 4]`, one `fnv1a`-keyed table with hits confirmed against the stored
 name, `Box<str>` - which is both smaller and closer to the original.
 
@@ -760,6 +760,14 @@ The fixed items remain documented as failure notes for future ports.
    `1469598103934665603`; the FNV-1a 64-bit basis is `14695981039346656037`, one digit
    longer. The hash is still a perfectly good fingerprint, but it is not FNV-1a. The Rust
    benchmark prints both so its output can still be diffed against the original's.
+
+   Then this port shipped the same class of bug into `st.rs`, in the commit that claimed
+   parity with C's hash: `0x1000_0000_01b3` for the FNV prime, one zero too many, 16x the
+   real value. Still a valid hash, still passed every test, still not FNV - and the doc
+   comment next to it asserted otherwise. The constants are now written as decimal exactly
+   as C spells them, and `fnv1a_matches_published_vectors` pins all three published vectors
+   plus two real tensor names hashed by C's own function. **A constant nothing tests is not
+   a constant, it is a guess**, and hex grouping is where FNV in particular goes wrong.
 2. **The `#[target_feature]` dispatch trap.** Documented in
    [section 1](#1-the-numeric-core-carries-explicit-neon-and-avx2) because anyone
    multiversioning kernels in Rust will hit it.

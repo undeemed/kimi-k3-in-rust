@@ -114,14 +114,19 @@ impl Tensor {
     }
 }
 
-/// FNV-1a over the name, the same hash C's table uses (k3_st.c:170). Keying the index by
-/// this instead of by an owned `String` is what keeps the 497,220 names from being stored
-/// twice; collisions are resolved by comparing the real name out of `tensors`.
+/// FNV-1a, byte for byte the hash C's table uses (`k3_st.c:64`). Keying the index by this
+/// instead of by an owned `String` is what keeps the 497,220 names from being stored twice;
+/// collisions are resolved by comparing the real name out of `tensors`.
+///
+/// The constants are written as decimal, exactly as C spells them, because the hex form is
+/// where this goes wrong: `0x1000_0000_01b3` has one zero too many and shipped here once,
+/// a still-valid hash that is no longer FNV. The C original's own `bench_kernels.c` carries
+/// a mangled basis for the same reason. `fnv1a_matches_published_vectors` pins it.
 fn fnv1a(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h: u64 = 14695981039346656037; // offset basis
     for b in s.as_bytes() {
         h ^= *b as u64;
-        h = h.wrapping_mul(0x1000_0000_01b3);
+        h = h.wrapping_mul(1099511628211); // prime, C: `h *= 1099511628211ull`
     }
     h
 }
@@ -713,4 +718,31 @@ fn out_as_bytes_mut(out: &mut [f32]) -> &mut [u8] {
     // SAFETY: `out` is a mutable borrowed slice of f32; reinterpreting as u8 of the same
     // byte width is valid for the borrow's lifetime and never violates aliasing.
     unsafe { std::slice::from_raw_parts_mut(ptr, len) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fnv1a;
+
+    /// The hash is only useful if it is *the same* hash C uses, and the constants are easy
+    /// to mistype: `0x1000_0000_01b3` differs from the FNV prime by one zero, still hashes
+    /// fine, and shipped here once. So pin it against the published FNV-1a 64 vectors and
+    /// against C's own `fnv1a` (`k3_st.c:64`) run over real checkpoint tensor names.
+    #[test]
+    fn fnv1a_matches_published_vectors() {
+        // Published FNV-1a 64 test vectors.
+        assert_eq!(fnv1a(""), 0xcbf2_9ce4_8422_2325, "offset basis");
+        assert_eq!(fnv1a("a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a("foobar"), 0x8594_4171_f739_67e8);
+
+        // Emitted by the C function itself over names from the released checkpoint.
+        assert_eq!(
+            fnv1a("language_model.model.layers.0.input_layernorm.weight"),
+            0x1b5f_dbad_e070_d054
+        );
+        assert_eq!(
+            fnv1a("language_model.model.layers.92.mlp.experts.895.down_proj.weight_scale"),
+            0x7eea_707b_1c4f_9d14
+        );
+    }
 }
