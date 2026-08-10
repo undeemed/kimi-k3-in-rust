@@ -36,3 +36,10 @@ opt-level = 3
 lto = "thin"
 # No target-cpu=native here: the C build's `make portable` philosophy. Opt in with
 #   RUSTFLAGS="-C target-cpu=native" cargo build --release
+
+# Diagnostic for the OOM at the 8 GB ceiling: measures what indexing the real
+# checkpoint's 497,220 tensors costs in resident memory. Runs against a header-only
+# replica, so it needs 76 MB rather than 1.56 TB.
+[[bin]]
+name = "measure_index"
+path = "tools/measure_index.rs"

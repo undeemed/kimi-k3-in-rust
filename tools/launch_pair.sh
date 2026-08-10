@@ -88,10 +88,17 @@ on_exit() {
   rc=\$?
   echo "EXIT status \$rc"
   if [ "\$rc" -ne 0 ]; then
-    echo "FAILED. Holding 20 minutes so a session can attach, then stopping."
+    # Do NOT stop on failure. Stopping discards the instance store, and that is where the
+    # 1.56 TB checkpoint lives, so a stop turns any late failure into another ~2.5 h
+    # download. Leave the box up and let the 12 h backstop bound it: that is hours to fix
+    # the cause and re-run against weights that are already on disk.
+    echo "FAILED, rc=\$rc. LEAVING THIS BOX RUNNING so the checkpoint survives."
     echo "  aws ssm start-session --target \$(cloud-init query instance_id 2>/dev/null || echo INSTANCE)"
-    echo "  then: cat /var/log/kimi-bench.log"
-    sleep 1200
+    echo "  cat /var/log/kimi-bench.log        # what went wrong"
+    echo "  ls -la /data/k3model /data/k3trunk # 1.56 TB + 109 GB, still here"
+    echo "  bash /root/rust-port/tools/rent_and_run.sh \$DEV   # re-runs, skips what is done"
+    echo "The 12 h backstop will stop it if nobody intervenes."
+    exit "\$rc"
   fi
   shutdown -h now
 }

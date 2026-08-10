@@ -60,25 +60,70 @@ impl Dtype {
 }
 
 /// One indexed tensor. `off` is the ABSOLUTE byte offset within its shard file.
+///
+/// Layout is deliberately allocation-frugal: the real checkpoint holds 497,220 tensors, so
+/// every per-tensor heap allocation is paid half a million times. `shape` is inline, which
+/// also matches C's `int64_t shape[4]` (k3_st.h:43), and `name` is a `Box<str>` rather than
+/// a `String` because the capacity field is never used. The names are NOT duplicated into
+/// the lookup table; see `St::index`.
 #[derive(Clone, Debug)]
 pub struct Tensor {
-    pub name: String,
+    pub name: Box<str>,
     pub shard: usize,
     pub dtype: Dtype,
-    pub shape: Vec<i64>,
+    /// Dims, valid for `rank` entries. C: `int64_t shape[4]`, k3_st.h:43.
+    shape: [i64; MAX_DIMS],
+    rank: u8,
     pub off: i64,
     pub nbytes: i64,
 }
 
+/// Rank ceiling, matching C's `int64_t shape[4]`. k3_st.h:43.
+pub const MAX_DIMS: usize = 4;
+
 impl Tensor {
+    /// The dims that are actually present. Scalars give `&[]`.
+    #[inline]
+    pub fn shape(&self) -> &[i64] {
+        &self.shape[..self.rank as usize]
+    }
+
     /// Product of all shape dims, or 1 for a scalar (`shape == []`). k3_st.c:44.
     pub fn numel(&self) -> i64 {
         let mut n: i64 = 1;
-        for &d in &self.shape {
+        for &d in self.shape() {
             n *= d;
         }
         n
     }
+
+    /// A synthetic descriptor for a raw byte span that is not a named checkpoint tensor.
+    /// `expert_load` uses it to spend one coalesced `pread` on a whole packed expert.
+    pub fn byte_span(name: &str, shard: usize, off: i64, nbytes: i64) -> Tensor {
+        let mut shape = [0i64; MAX_DIMS];
+        shape[0] = nbytes;
+        Tensor {
+            name: name.into(),
+            shard,
+            dtype: Dtype::U8,
+            shape,
+            rank: 1,
+            off,
+            nbytes,
+        }
+    }
+}
+
+/// FNV-1a over the name, the same hash C's table uses (k3_st.c:170). Keying the index by
+/// this instead of by an owned `String` is what keeps the 497,220 names from being stored
+/// twice; collisions are resolved by comparing the real name out of `tensors`.
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h
 }
 
 /// An open safetensors store: every shard indexed, every tensor addressable by name.
@@ -90,7 +135,10 @@ pub struct St {
     #[allow(dead_code)]
     paths: Vec<PathBuf>,
     tensors: Vec<Tensor>,
-    index: HashMap<String, usize>,
+    /// `fnv1a(name)` -> position in `tensors`. Keyed by hash, not by an owned name, so the
+    /// 497,220 names are stored once rather than twice. C does the same thing with an
+    /// open-addressed FNV table over an arena, k3_st.c:170.
+    index: HashMap<u64, u32>,
 }
 
 impl St {
@@ -120,7 +168,7 @@ impl St {
         let mut files = Vec::with_capacity(nshard);
         let mut dfiles: Vec<Option<File>> = Vec::with_capacity(nshard);
         let mut tensors: Vec<Tensor> = Vec::new();
-        let mut index: HashMap<String, usize> = HashMap::new();
+        let mut index: HashMap<u64, u32> = HashMap::new();
 
         for (shard, path) in shard_paths.iter().enumerate() {
             // Buffered descriptor, kept for `read`/`read_f32`. k3_st.c:199.
@@ -234,18 +282,34 @@ impl St {
                 }
 
                 // Duplicate-name check: the C hash insert refuses a second copy of the
-                // same name. k3_st.c:422.
-                if index.contains_key(name) {
-                    let prev = &tensors[*index.get(name).unwrap()];
+                // same name. k3_st.c:422. The key is a hash, so a hit is only a candidate:
+                // compare the stored name before refusing, or an unrelated collision would
+                // reject a legitimate tensor.
+                let h = fnv1a(name);
+                if let Some(&prev_i) = index.get(&h) {
+                    let prev = &tensors[prev_i as usize];
+                    if &*prev.name == name {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "k3_st: duplicate tensor name {} (shard {} and shard {})",
+                                name, prev.shard, shard
+                            ),
+                        ));
+                    }
+                    // A genuine 64-bit FNV collision between two different names. Refusing
+                    // is the honest response: silently overwriting would lose a tensor, and
+                    // chaining here would complicate every lookup for an event that has
+                    // never been observed on this checkpoint.
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!(
-                            "k3_st: duplicate tensor name {} (shard {} and shard {})",
-                            name, prev.shard, shard
+                            "k3_st: name hash collision between {} and {} (both {:#018x})",
+                            prev.name, name, h
                         ),
                     ));
                 }
-                index.insert(name.clone(), tensors.len());
+                index.insert(h, tensors.len() as u32);
                 tensors.push(t);
             }
 
@@ -270,8 +334,12 @@ impl St {
     }
 
     /// O(1) lookup. Returns `None` when absent. k3_st.c:442.
+    ///
+    /// The table is keyed by `fnv1a(name)`, so a hit is confirmed against the stored name;
+    /// a colliding-but-different name must miss rather than return the wrong tensor.
     pub fn find(&self, name: &str) -> Option<&Tensor> {
-        self.index.get(name).map(|&i| &self.tensors[i])
+        let t = &self.tensors[*self.index.get(&fnv1a(name))? as usize];
+        (&*t.name == name).then_some(t)
     }
 
     /// Raw bytes, exactly as stored. `buf` must hold `t.nbytes`. Returns bytes read.
@@ -491,10 +559,25 @@ fn build_tensor(
         ));
     }
 
-    // shape. A scalar is `[]`. k3_st.c:284.
-    let shape: Vec<i64> = match entry.get("shape") {
+    // shape. A scalar is `[]`. k3_st.c:284. Written into an inline `[i64; 4]`, matching C's
+    // `int64_t shape[4]`; a longer shape is refused rather than truncated, because silently
+    // dropping a dim would make every later read of this tensor misaligned.
+    let mut shape = [0i64; MAX_DIMS];
+    let mut rank = 0usize;
+    match entry.get("shape") {
         Some(serde_json::Value::Array(a)) => {
-            let mut s = Vec::with_capacity(a.len());
+            if a.len() > MAX_DIMS {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "k3_st: {}: {} has rank {} (max {})",
+                        path.display(),
+                        name,
+                        a.len(),
+                        MAX_DIMS
+                    ),
+                ));
+            }
             for d in a {
                 let v = d.as_i64().ok_or_else(|| {
                     io::Error::new(
@@ -502,18 +585,18 @@ fn build_tensor(
                         format!("k3_st: {}: {} has non-integer shape", path.display(), name),
                     )
                 })?;
-                s.push(v);
+                shape[rank] = v;
+                rank += 1;
             }
-            s
         }
-        Some(serde_json::Value::Null) | None => Vec::new(),
+        Some(serde_json::Value::Null) | None => {}
         Some(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("k3_st: {}: {} shape is not an array", path.display(), name),
             ));
         }
-    };
+    }
 
     // data_offsets. k3_st.c:299.
     let offs = entry.get("data_offsets").ok_or_else(|| {
@@ -568,10 +651,11 @@ fn build_tensor(
     })?;
 
     Ok(Tensor {
-        name: name.to_string(),
+        name: name.into(),
         shard,
         dtype,
         shape,
+        rank: rank as u8,
         off: base + o0,
         nbytes: o1 - o0,
     })

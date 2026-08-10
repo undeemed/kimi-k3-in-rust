@@ -91,7 +91,7 @@ fn weird_name_with_escapes_is_indexed() {
         .find(r#"weird\name."with"quotes"#)
         .expect("weird-name tensor must be indexed");
     assert_eq!(t.dtype, Dtype::F32);
-    assert_eq!(t.shape, vec![3]);
+    assert_eq!(t.shape(), vec![3]);
     assert_eq!(t.numel(), 3);
     assert_eq!(t.shard, 1);
 }
@@ -101,7 +101,7 @@ fn plain_f32_2d() {
     let st = St::open(&fixtures_st()).expect("open");
     let t = st.find("plain.f32.2d").expect("plain.f32.2d present");
     assert_eq!(t.dtype, Dtype::F32);
-    assert_eq!(t.shape, vec![16, 16]);
+    assert_eq!(t.shape(), vec![16, 16]);
     assert_eq!(t.numel(), 256);
     assert_eq!(t.shard, 0);
     assert_eq!(t.nbytes, 1024);
@@ -126,7 +126,7 @@ fn plain_bf16_1d() {
     let st = St::open(&fixtures_st()).expect("open");
     let t = st.find("plain.bf16.1d").expect("plain.bf16.1d present");
     assert_eq!(t.dtype, Dtype::Bf16);
-    assert_eq!(t.shape, vec![128]);
+    assert_eq!(t.shape(), vec![128]);
     assert_eq!(t.numel(), 128);
     assert_eq!(t.shard, 0);
     assert_eq!(t.nbytes, 256);
@@ -158,7 +158,7 @@ fn tricky_f16_1d() {
     let st = St::open(&fixtures_st()).expect("open");
     let t = st.find("tricky.f16.1d").expect("tricky.f16.1d present");
     assert_eq!(t.dtype, Dtype::F16);
-    assert_eq!(t.shape, vec![64]);
+    assert_eq!(t.shape(), vec![64]);
     assert_eq!(t.numel(), 64);
     assert_eq!(t.shard, 0);
     assert_eq!(t.nbytes, 128);
@@ -194,7 +194,7 @@ fn packed_u8_2d() {
     let st = St::open(&fixtures_st()).expect("open");
     let t = st.find("packed.u8.2d").expect("packed.u8.2d present");
     assert_eq!(t.dtype, Dtype::U8);
-    assert_eq!(t.shape, vec![7, 32]);
+    assert_eq!(t.shape(), vec![7, 32]);
     assert_eq!(t.numel(), 224);
     assert_eq!(t.shard, 0);
     assert_eq!(t.nbytes, 224);
@@ -220,7 +220,7 @@ fn scalar_f32() {
     let t = st.find("scalar.f32").expect("scalar.f32 present");
     assert_eq!(t.dtype, Dtype::F32);
     // A scalar has shape [] in safetensors; numel is 1.
-    assert_eq!(t.shape, Vec::<i64>::new());
+    assert_eq!(t.shape(), Vec::<i64>::new());
     assert_eq!(t.numel(), 1);
     assert_eq!(t.shard, 0);
     assert_eq!(t.nbytes, 4);
@@ -238,7 +238,7 @@ fn second_shard_f32() {
         .find("second.shard.f32")
         .expect("second.shard.f32 present");
     assert_eq!(t.dtype, Dtype::F32);
-    assert_eq!(t.shape, vec![10, 10]);
+    assert_eq!(t.shape(), vec![10, 10]);
     assert_eq!(t.numel(), 100);
     // This one lives in the SECOND shard, which is the whole point of the case.
     assert_eq!(t.shard, 1);
@@ -287,7 +287,12 @@ fn rebuilds_index_under_target_without_touching_fixtures() {
         }
         s.push_str(&format!(
             "  \"{}\": {{\"shard\":{},\"dtype\":\"{:?}\",\"shape\":{:?},\"off\":{},\"nbytes\":{}}}",
-            t.name, t.shard, t.dtype, t.shape, t.off, t.nbytes
+            t.name,
+            t.shard,
+            t.dtype,
+            t.shape(),
+            t.off,
+            t.nbytes
         ));
     }
     s.push_str("\n}\n");
@@ -300,7 +305,7 @@ fn empty_tensor_has_zero_numel_and_zero_bytes() {
     let st = St::open(&fixtures_st()).expect("open");
     let t = st.find("empty.f32").expect("empty.f32 present");
     assert_eq!(t.dtype, Dtype::F32);
-    assert_eq!(t.shape, vec![0, 8]);
+    assert_eq!(t.shape(), vec![0, 8]);
     assert_eq!(t.numel(), 0);
     assert_eq!(t.nbytes, 0);
     // Reading zero bytes into a zero-length buffer must succeed and return 0.
@@ -314,12 +319,12 @@ fn rank3_and_rank4_tensors_index() {
     let st = St::open(&fixtures_st()).expect("open");
     let t = st.find("rank3.f32").expect("rank3.f32 present");
     assert_eq!(t.dtype, Dtype::F32);
-    assert_eq!(t.shape, vec![2, 3, 4]);
+    assert_eq!(t.shape(), vec![2, 3, 4]);
     assert_eq!(t.numel(), 24);
 
     let t = st.find("rank4.u8").expect("rank4.u8 present");
     assert_eq!(t.dtype, Dtype::U8);
-    assert_eq!(t.shape, vec![2, 2, 2, 2]);
+    assert_eq!(t.shape(), vec![2, 2, 2, 2]);
     assert_eq!(t.numel(), 16);
 }
 
@@ -332,7 +337,7 @@ fn expert_packed_tensors_resolve() {
         .find("language_model.model.layers.0.block_sparse_moe.experts.0.w1.weight_packed")
         .expect("expert 0 w1 packed");
     assert_eq!(t.dtype, Dtype::U8);
-    assert_eq!(t.shape, vec![2, 32]);
+    assert_eq!(t.shape(), vec![2, 32]);
     assert_eq!(t.numel(), 64);
     assert_eq!(t.nbytes, 64);
 
@@ -340,5 +345,76 @@ fn expert_packed_tensors_resolve() {
         .find("language_model.model.layers.0.block_sparse_moe.experts.1.w1.weight_packed")
         .expect("expert 1 w1 packed");
     assert_eq!(t.dtype, Dtype::U8);
-    assert_eq!(t.shape, vec![2, 32]);
+    assert_eq!(t.shape(), vec![2, 32]);
+}
+
+/// Write a one-shard directory holding exactly the given header entries, sized so every
+/// tensor's span lies inside the file. Used to drive the reader's refusal paths, which no
+/// fixture can express: a committed fixture with a duplicate name would break every other
+/// test that opens the directory.
+fn write_header_only(dir: &Path, shards: &[(&str, &str)]) {
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).expect("mkdir");
+    for (fname, header) in shards {
+        let mut blob = header.as_bytes().to_vec();
+        while blob.len() % 8 != 0 {
+            blob.push(b' ');
+        }
+        let mut out = (blob.len() as u64).to_le_bytes().to_vec();
+        out.extend_from_slice(&blob);
+        out.resize(out.len() + 4096, 0); // room for any span the header declares
+        std::fs::write(dir.join(fname), out).expect("write shard");
+    }
+}
+
+#[test]
+fn duplicate_name_across_shards_is_refused() {
+    // C's hash insert refuses a second copy of a name (k3_st.c:422). The index is keyed by
+    // FNV-1a rather than by an owned string, so this refusal runs through a hash hit plus a
+    // name comparison; without the comparison a collision would false-positive, and without
+    // the refusal a duplicate would silently shadow the first tensor.
+    let dir = scratch_dir().join("dup");
+    let entry = r#"{"same.name":{"dtype":"F32","shape":[2],"data_offsets":[0,8]}}"#;
+    write_header_only(
+        &dir,
+        &[
+            ("model-00001-of-00002.safetensors", entry),
+            ("model-00002-of-00002.safetensors", entry),
+        ],
+    );
+
+    let err = match St::open(&dir) {
+        Ok(_) => panic!("duplicate name must be refused"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("duplicate tensor name") && msg.contains("same.name"),
+        "expected a duplicate-name refusal naming the tensor, got: {msg}"
+    );
+}
+
+#[test]
+fn rank_above_four_is_refused_not_truncated() {
+    // Shape is stored inline as `[i64; 4]`, matching C's `int64_t shape[4]`. A rank-5 tensor
+    // has to be refused: truncating to the first four dims would leave numel disagreeing
+    // with the byte span, and every later read of that tensor misaligned.
+    let dir = scratch_dir().join("rank5");
+    write_header_only(
+        &dir,
+        &[(
+            "model-00001-of-00001.safetensors",
+            r#"{"too.deep":{"dtype":"F32","shape":[2,2,2,2,2],"data_offsets":[0,128]}}"#,
+        )],
+    );
+
+    let err = match St::open(&dir) {
+        Ok(_) => panic!("rank 5 must be refused"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("rank 5") && msg.contains("max 4"),
+        "expected a rank-ceiling refusal, got: {msg}"
+    );
 }

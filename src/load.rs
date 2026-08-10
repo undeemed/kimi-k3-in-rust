@@ -106,19 +106,23 @@ pub fn expert_ref(s: &St, layer: usize, expert: usize) -> io::Result<ExpertRef> 
             ));
         }
         // Both must be 2D. k3_load.c:36.
-        if pki.shape.len() != 2 || sci.shape.len() != 2 {
+        if pki.shape().len() != 2 || sci.shape().len() != 2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("k3_load: L{} expert {} {} is not 2D", layer, expert, W[i]),
             ));
         }
         // Row counts must agree. k3_load.c:40.
-        if pki.shape[0] != sci.shape[0] {
+        if pki.shape()[0] != sci.shape()[0] {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "k3_load: L{} expert {} {} row mismatch {} vs {}",
-                    layer, expert, W[i], pki.shape[0], sci.shape[0]
+                    layer,
+                    expert,
+                    W[i],
+                    pki.shape()[0],
+                    sci.shape()[0]
                 ),
             ));
         }
@@ -126,8 +130,8 @@ pub fn expert_ref(s: &St, layer: usize, expert: usize) -> io::Result<ExpertRef> 
         // does not, the group size is not 32 for this tensor and every scale after the
         // first would be applied to the wrong 32 weights. Silent, and catastrophic.
         // k3_load.c:46.
-        let logical = pki.shape[1] * 2;
-        if sci.shape[1] * MXFP4_GROUP as i64 != logical {
+        let logical = pki.shape()[1] * 2;
+        if sci.shape()[1] * MXFP4_GROUP as i64 != logical {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -135,10 +139,10 @@ pub fn expert_ref(s: &St, layer: usize, expert: usize) -> io::Result<ExpertRef> 
                     layer,
                     expert,
                     W[i],
-                    sci.shape[1],
+                    sci.shape()[1],
                     logical,
-                    if sci.shape[1] != 0 {
-                        logical as f64 / sci.shape[1] as f64
+                    if sci.shape()[1] != 0 {
+                        logical as f64 / sci.shape()[1] as f64
                     } else {
                         0.0
                     },
@@ -164,9 +168,9 @@ pub fn expert_ref(s: &St, layer: usize, expert: usize) -> io::Result<ExpertRef> 
             ));
         }
 
-        r.m[i].rows = pki.shape[0] as usize;
-        r.m[i].pcols = pki.shape[1] as usize;
-        r.m[i].scols = sci.shape[1] as usize;
+        r.m[i].rows = pki.shape()[0] as usize;
+        r.m[i].pcols = pki.shape()[1] as usize;
+        r.m[i].scols = sci.shape()[1] as usize;
         r.m[i].p_bytes = pki.nbytes;
         r.m[i].s_bytes = sci.nbytes;
     }
@@ -226,14 +230,7 @@ pub fn expert_ref(s: &St, layer: usize, expert: usize) -> io::Result<ExpertRef> 
 pub fn expert_load(s: &St, r: &ExpertRef, buf: &mut [u8]) -> io::Result<i64> {
     if r.contiguous {
         // The whole point: one coalesced read. k3_load.c:109.
-        let t = crate::st::Tensor {
-            name: String::from("expert"),
-            shard: r.shard,
-            dtype: crate::st::Dtype::U8,
-            shape: vec![r.nbytes],
-            off: r.off,
-            nbytes: r.nbytes,
-        };
+        let t = crate::st::Tensor::byte_span("expert", r.shard, r.off, r.nbytes);
         return s.read(&t, buf);
     }
 
