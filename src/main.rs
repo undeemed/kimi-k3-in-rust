@@ -1038,6 +1038,7 @@ fn run() -> i32 {
     let mut save_state: Option<String> = None;
     let mut preset_name: Option<String> = None;
     let mut incremental = false;
+    let mut plan_only = false;
 
     // Flags are applied in argv order, so an explicit --trunk-gb/--cache-gb after a
     // --preset still wins, exactly as the C parser behaves.
@@ -1158,6 +1159,7 @@ fn run() -> i32 {
             },
             "--tf-check" => tf_check = true,
             "--incremental" => incremental = true,
+            "--plan-only" => plan_only = true,
             "--list-presets" => {
                 let mut o = io::stdout();
                 preset_list(&mut o);
@@ -1480,6 +1482,18 @@ fn run() -> i32 {
         println!("  trunk {:<10} {}\n  embed + lm_head  {}\n  expert cache     {}\n  recurrent state  {}\n  buffers          {}\n  KV cache         {}\n  tensor index     {}\n  TOTAL            {}",
             if trunk_dir.is_some() { "(STREAMED)" } else { "(resident)" },
             human(w_trunk), human(w_model), human(w_cache), human(w_state), human(w_buf), human(w_kv), human(w_index), human(need_b));
+        // A machine-readable copy, emitted before the local-availability check, because a
+        // forecast must not depend on the machine doing the forecasting: the point of
+        // --plan-only is to size a DIFFERENT box, usually one not yet rented. The caller
+        // compares this against the cap it intends to impose.
+        if plan_only {
+            println!("plan_bytes {}", need_b as u64);
+            println!(
+                "\nplan only, nothing was loaded. This forecast needs no tensor data, so it can be\n\
+                 taken against a header-only replica of a checkpoint before renting anything."
+            );
+            return 0;
+        }
         if have > 0.0 {
             println!("  available        {}", human(have));
             if need_b > have * 0.95 {
