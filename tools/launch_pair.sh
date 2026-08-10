@@ -69,9 +69,15 @@ exec > >(tee -a /var/log/kimi-bench.log | tee /dev/console) 2>&1
 set -x
 
 # Guaranteed end, whatever happens. Without this a box that fails early, or wedges on a
-# stalled download, runs until someone remembers it. 8 hours covers the worst case of a
-# 1.56 TB pull plus the run.
-shutdown -h +480 "kimi-bench backstop" &
+# stalled download, runs until someone remembers it.
+#
+# 12 hours, not 8, because the two costs are lopsided. Measured on the live box: 242 MB/s
+# download, and modelling the runs off the reference's own 57.3% I/O split puts the whole
+# job at 2.3-2.8 h. But a backstop that fires mid-run stops the instance, and stopping
+# discards the instance store, so the 1.56 TB has to be pulled again: ~2 h lost against
+# ~$6 of idle billing for the extra headroom. The run stops itself when it finishes, so
+# this only ever fires on a hang.
+shutdown -h +720 "kimi-bench backstop" &
 
 # Shut down on the way out, success or failure. Instance-initiated shutdown is set to STOP,
 # not terminate, which is what makes this safe to do on failure too: a stopped instance
