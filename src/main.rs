@@ -144,13 +144,13 @@ fn own_rss_bytes() -> f64 {
         .map_or(0.0, |kb| kb * 1024.0)
 }
 
-/// Remaining headroom in this process's memory cgroup, or `None` when uncapped.
+/// The memory cgroup's `(cap, current_charge)` for this process, or `None` when uncapped.
 ///
 /// Handles cgroup v2 (`memory.max`, `memory.current`) and v1 (`memory.limit_in_bytes`,
 /// `memory.usage_in_bytes`). v2 writes the literal `max` when unlimited; v1 writes a
 /// sentinel near `u64::MAX`, which is why an absurd limit is treated as uncapped rather
 /// than as headroom.
-fn cgroup_headroom_bytes() -> Option<f64> {
+fn cgroup_mem_bytes() -> Option<(f64, f64)> {
     // v2 puts this process's cgroup after `0::`; the controller files hang off that path.
     let rel = fs::read_to_string("/proc/self/cgroup")
         .ok()
@@ -160,16 +160,21 @@ fn cgroup_headroom_bytes() -> Option<f64> {
         })
         .unwrap_or_default();
 
-    cgroup_headroom_under(&[
+    cgroup_mem_under(&[
         format!("/sys/fs/cgroup{rel}"),
         "/sys/fs/cgroup".to_string(),
         "/sys/fs/cgroup/memory".to_string(),
     ])
 }
 
-/// The parsing and arithmetic behind `cgroup_headroom_bytes`, over explicit roots so it can
-/// be tested without a container. Tries each root in order and takes the first real cap.
-fn cgroup_headroom_under(roots: &[String]) -> Option<f64> {
+/// Remaining headroom in this process's memory cgroup, or `None` when uncapped.
+fn cgroup_headroom_bytes() -> Option<f64> {
+    cgroup_mem_bytes().map(|(cap, cur)| (cap - cur).max(0.0))
+}
+
+/// The parsing behind `cgroup_mem_bytes`, over explicit roots so it can be tested without
+/// a container. Tries each root in order and takes the first real cap.
+fn cgroup_mem_under(roots: &[String]) -> Option<(f64, f64)> {
     // "Unlimited" has three spellings in the wild: v2's literal `max`, and v1's numeric
     // sentinels - u64::MAX, i64::MAX, and (most commonly) i64::MAX rounded down to a page
     // multiple, 0x7FFF_FFFF_FFFF_F000. That last one sits just BELOW u64::MAX / 2, so a
@@ -196,7 +201,7 @@ fn cgroup_headroom_under(roots: &[String]) -> Option<f64> {
         ] {
             if let Some(max) = num(format!("{base}/{lim}")) {
                 let cur = num(format!("{base}/{use_}")).unwrap_or(0);
-                return Some(max.saturating_sub(cur) as f64);
+                return Some((max as f64, cur as f64));
             }
         }
     }
@@ -1510,28 +1515,38 @@ fn run() -> i32 {
             );
             return 0;
         }
-        if have > 0.0 {
-            // `need_b` is the TOTAL the process will hold; `have` is what it may STILL
-            // take. By plan time the index (and the binary, and the header page cache) are
-            // already built and already charged against `have`, so comparing the two raw
-            // double-counts everything currently resident: counted in the need, missing
-            // from the available. Add our own current footprint back. On the released
-            // checkpoint that asymmetry is ~200 MB, and it refused a run on a box where the
-            // C build had just completed under the same cap.
+        // The margin covers what the forecast cannot see: page tables (16 MB measured at
+        // the OOM kill), kernel accounting, and forecast error (13 MB observed against the
+        // killed run's actual peak). A percentage is the wrong shape - 5% of this plan is
+        // 430 MB, which refused a run on a box where the C build had just completed under
+        // the same cap, and where the plan measurably fit with ~116 MB to spare. A wrong
+        // refusal and a mid-run kill now cost the same thing (the box holds either way),
+        // so the guard is sized to measurements, not to fear.
+        const MARGIN: f64 = 64.0 * 1024.0 * 1024.0;
+        if let Some((cap, _)) = cgroup_mem_bytes() {
+            // Under a cgroup cap, the plan compares against the CAP, not against
+            // remaining headroom. Two reasons, both from the forensics of the run this
+            // guard failed to save and the run it then wrongly refused:
+            //   - The plan is a forecast of ANON memory, and anon is what kills: at the
+            //     OOM the process held anon-rss 7.98 GiB and file-rss 2 MB. File pages
+            //     yield under pressure, so page cache charged to the cgroup (headers read
+            //     while indexing) reduces headroom but not what the run can actually hold.
+            //   - Headroom double-counts: by plan time the index is built, so it is both
+            //     inside `need_b` and already subtracted from headroom. 8.47 GB of need
+            //     was refused at an 8.59 GB cap on that arithmetic.
+            println!("  cgroup cap       {}", human(cap));
+            if need_b + MARGIN > cap {
+                eprintln!("\nREFUSING TO START: this needs {} (+ {} margin) against a {} memory cap.\nThe cap is the limit here, not the host's free memory.\nOptions: a larger cap, a smaller --cache-gb or --trunk-gb, or fewer --layers.",
+                    human(need_b), human(MARGIN), human(cap));
+                return 1;
+            }
+        } else if have > 0.0 {
+            // Uncapped: compare against what the host can still hand out, plus what this
+            // process already holds (the plan's total includes it; MemAvailable does not).
             let usable = have + own_rss_bytes();
-            // Absolute margin, not a percentage. The forecast matched the observed peak of
-            // the OOM-killed 93-layer run to 13 MB, so 128 MB is ~10x the demonstrated
-            // error; a 5% slack at this scale is 430 MB and refuses runs that measurably
-            // fit. A wrong refusal and a mid-run kill now cost the same thing - a re-run -
-            // so the guard should be tight rather than timid.
-            const MARGIN: f64 = 128.0 * 1024.0 * 1024.0;
-            println!(
-                "  available        {}  (+ {} already resident)",
-                human(have),
-                human(own_rss_bytes())
-            );
+            println!("  available        {}", human(usable));
             if need_b + MARGIN > usable {
-                eprintln!("\nREFUSING TO START: this needs {} (+ {} margin) and only {} is usable.\nIf a cgroup or container memory cap is in force, that cap is the limit here, not the host's free memory.\nOptions: a larger cap, a smaller --cache-gb or --trunk-gb, or fewer --layers.",
+                eprintln!("\nREFUSING TO START: this needs {} (+ {} margin) and only {} is available.\nOptions: more free memory, a smaller --cache-gb or --trunk-gb, or fewer --layers.",
                     human(need_b), human(MARGIN), human(usable));
                 return 1;
             }
@@ -2357,7 +2372,7 @@ mod tests {
 
 #[cfg(test)]
 mod cgroup_tests {
-    use super::cgroup_headroom_under;
+    use super::cgroup_mem_under;
 
     /// Writes a fake cgroup tree and returns its root.
     fn tree(files: &[(&str, &str)]) -> std::path::PathBuf {
@@ -2371,7 +2386,7 @@ mod cgroup_tests {
     }
 
     fn under(d: &std::path::Path) -> Option<f64> {
-        cgroup_headroom_under(&[d.display().to_string()])
+        cgroup_mem_under(&[d.display().to_string()]).map(|(cap, cur)| (cap - cur).max(0.0))
     }
 
     #[test]
@@ -2431,7 +2446,7 @@ mod cgroup_tests {
     #[test]
     fn missing_tree_is_uncapped() {
         assert_eq!(
-            cgroup_headroom_under(&["/nonexistent/k3/cgroup".to_string()]),
+            cgroup_mem_under(&["/nonexistent/k3/cgroup".to_string()]),
             None
         );
     }
