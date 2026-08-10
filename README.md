@@ -140,6 +140,15 @@ including inside the collapsed blocks.
    hand-write intrinsics and the instruction mix is identical, so expect parity.
    [Numbers](#c-against-rust-measured).
 
+8. **Then the full 93 layers, on a rented box, killed it.** Not the C build - this one. At
+   the 8 GiB ceiling the original is built around, C completed and the port was OOM-killed
+   at `anon-rss 7.984 GiB`, over by 16 MiB. The cause was indexing: the real checkpoint
+   holds 497,220 tensors, and this port was paying 415 bytes each to C's ~130, because
+   every tensor had a heap-allocated name, a heap-allocated shape, and a *second* copy of
+   the name as a hash key. Now 216 bytes, by adopting what C already did - inline
+   `shape[4]`, one FNV-keyed table, names stored once.
+   [How it was measured without renting anything](#reproducing-the-oom-on-a-laptop).
+
 12,709 lines of Rust, four dependencies, a 1.16 MB binary.
 
 ## Running it
@@ -545,6 +554,62 @@ threads on the strength of a single bad run. The minimum is the run least distur
 storage, which is the one that compares the code. The medians are drawn on the chart as
 caps so the spread stays visible. Raw data:
 [`docs/data/real-checkpoint.csv`](docs/data/real-checkpoint.csv).
+
+<a id="reproducing-the-oom-on-a-laptop"></a>
+#### All 93 layers, and the OOM that came with them
+
+The two-layer figures above are the shipped comparison. The full model was then run once on
+a rented `im4gn.4xlarge` (16 vCPU Graviton2, 1.875 TB local NVMe) against the whole 1.56 TB
+checkpoint, at the `MemoryMax=8G` ceiling the original is built around. **C completed. This
+port did not.**
+
+```text
+C, 93 layers, 8 GiB cap
+  8 tokens in 596.1 s, 74.51 s/token
+  PEAK RSS 8.28 GB
+  1472 expert requests, 25.83 GB read per token
+  I/O share of wall clock: 78.1%   (trunk 364.2 s + experts 101.1 s)
+
+Rust, same box, same cap
+  Memory cgroup out of memory: Killed process 7040 (k3) anon-rss:8371976kB
+```
+
+7.984 GiB against an 8 GiB cap: over by **16 MiB**. C's own figures land where the
+reference says they should - 1472 requests and 25.83 GB per token - so the box was fine and
+the port was not.
+
+The cause was the index, and it did not need a rented machine to find. `St::open` reads
+only the JSON header at the front of each shard and never touches tensor data, so a
+**sparse header-only replica** stands in for the checkpoint: real names from
+`model.safetensors.index.json`, real shapes sampled from the shards already on disk, each
+file truncated to its full logical length so the reader's EOF check still passes.
+
+```text
+logical  1.589 TB   <- what the reader sees
+on disk     76 MB   <- sparse holes cost nothing
+```
+
+That reproduces the real 497,220-tensor index on a laptop, and
+[`tools/measure_index.rs`](tools/measure_index.rs) weighs it:
+
+```text
+                index cost    per tensor
+before              206 MB    415 bytes
+after               107 MB    216 bytes
+C, for reference     ~65 MB    ~130 bytes
+```
+
+Every tensor was paying for a heap-allocated name, a heap-allocated `Vec` shape, and a
+*second* copy of the name as a `HashMap<String, _>` key. C pays for none of those: an arena
+behind an open-addressed FNV table, with an inline `int64_t shape[4]`. The fix adopts all
+three - inline `[i64; 4]`, one `fnv1a`-keyed table with hits confirmed against the stored
+name, `Box<str>` - which is both smaller and closer to the original.
+
+**The full-model speed comparison is therefore still open.** The number that stands is the
+two-layer one above. Re-running the full stack means another 1.56 TB pull;
+[`tools/rent_and_run.sh`](tools/rent_and_run.sh) does it end to end, and now leaves the box
+up on failure rather than stopping, because stopping discards the instance store and turns
+any late failure into another 2.5-hour download. That is how this run was lost.
 
 <a id="why-the-synthetic-number-was-low"></a>
 #### Why the synthetic number was low
