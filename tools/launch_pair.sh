@@ -13,14 +13,14 @@
 # Results land in /tmp/result.csv on the box and in the console log.
 #
 # Usage:
-#   aws sso login --profile prox-dev-sso
-#   PROFILE=prox-dev-sso bash tools/launch_pair.sh check     # quotas and AMIs only, free
-#   PROFILE=prox-dev-sso bash tools/launch_pair.sh launch    # spends money
-#   PROFILE=prox-dev-sso bash tools/launch_pair.sh status
-#   PROFILE=prox-dev-sso bash tools/launch_pair.sh kill      # terminate both
+#   aws sso login --profile myorg
+#   PROFILE=myorg bash tools/launch_pair.sh check     # quotas and AMIs only, free
+#   PROFILE=myorg bash tools/launch_pair.sh launch    # spends money
+#   PROFILE=myorg bash tools/launch_pair.sh status
+#   PROFILE=myorg bash tools/launch_pair.sh kill      # terminate both
 set -euo pipefail
 
-PROFILE="${PROFILE:?set PROFILE, e.g. PROFILE=prox-dev-sso}"
+PROFILE="${PROFILE:?set PROFILE to an aws profile, e.g. PROFILE=myorg}"
 REGION="${REGION:-us-east-1}"
 TAG=kimi-k3-bench
 RUST_REPO="${RUST_REPO:-https://github.com/undeemed/kimi-k3-in-rust.git}"
