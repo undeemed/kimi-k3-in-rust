@@ -347,6 +347,24 @@ impl St {
         (&*t.name == name).then_some(t)
     }
 
+    /// Resident bytes this index occupies, so the memory plan can account for it.
+    ///
+    /// The plan used to omit this entirely, which is how a 93-layer run got OOM-killed 16
+    /// MiB over an 8 GiB cap: the forecast cleared the cap by 210 MB while the unreported
+    /// index cost 206 MB. On the released checkpoint this is 497,220 tensors, so it is not
+    /// a rounding error, and it scales with the checkpoint rather than with the config.
+    ///
+    /// Counts the `Tensor` array, every heap-allocated name, and the hash table's live
+    /// allocation. This is deliberately a floor: it cannot see the allocator's per-block
+    /// rounding, so the true footprint is somewhat higher.
+    pub fn index_bytes(&self) -> u64 {
+        let vec = self.tensors.capacity() * std::mem::size_of::<Tensor>();
+        let names: usize = self.tensors.iter().map(|t| t.name.len()).sum();
+        let table =
+            self.index.capacity() * (std::mem::size_of::<u64>() + std::mem::size_of::<u32>());
+        (vec + names + table) as u64
+    }
+
     /// Raw bytes, exactly as stored. `buf` must hold `t.nbytes`. Returns bytes read.
     /// k3_st.c:497.
     pub fn read(&self, t: &Tensor, buf: &mut [u8]) -> io::Result<i64> {

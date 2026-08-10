@@ -102,20 +102,89 @@ fn peak_rss_bytes() -> f64 {
     }
 }
 
-/// `MemAvailable`, what the kernel thinks can actually be handed out. Returns 0 if it
-/// cannot be read.
+/// Bytes this process may still allocate before it is killed.
+///
+/// `/proc/meminfo` alone is not that number. Under a cgroup memory cap - a container, or
+/// `systemd-run -p MemoryMax=8G` - the host can report tens of GB free while the process is
+/// killed at 8 GiB. That is not hypothetical: it is how a 93-layer run died 16 MiB over its
+/// cap with this function reporting ~55 GB available, so the refusal below never fired.
+/// The binding constraint is the cgroup's remaining headroom, so take the smaller.
 fn mem_available_bytes() -> f64 {
-    let mut f = match fs::read_to_string("/proc/meminfo") {
-        Ok(s) => s,
-        Err(_) => return 0.0,
+    let host = fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|s| {
+            s.lines().find_map(|l| {
+                l.strip_prefix("MemAvailable:")
+                    .and_then(|r| r.split_whitespace().next()?.parse::<f64>().ok())
+            })
+        })
+        .map(|kb| kb * 1024.0);
+
+    match (host, cgroup_headroom_bytes()) {
+        (Some(h), Some(c)) => h.min(c),
+        (Some(h), None) => h,
+        (None, Some(c)) => c,
+        (None, None) => 0.0,
+    }
+}
+
+/// Remaining headroom in this process's memory cgroup, or `None` when uncapped.
+///
+/// Handles cgroup v2 (`memory.max`, `memory.current`) and v1 (`memory.limit_in_bytes`,
+/// `memory.usage_in_bytes`). v2 writes the literal `max` when unlimited; v1 writes a
+/// sentinel near `u64::MAX`, which is why an absurd limit is treated as uncapped rather
+/// than as headroom.
+fn cgroup_headroom_bytes() -> Option<f64> {
+    // v2 puts this process's cgroup after `0::`; the controller files hang off that path.
+    let rel = fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("0::").map(|p| p.trim().to_string()))
+        })
+        .unwrap_or_default();
+
+    cgroup_headroom_under(&[
+        format!("/sys/fs/cgroup{rel}"),
+        "/sys/fs/cgroup".to_string(),
+        "/sys/fs/cgroup/memory".to_string(),
+    ])
+}
+
+/// The parsing and arithmetic behind `cgroup_headroom_bytes`, over explicit roots so it can
+/// be tested without a container. Tries each root in order and takes the first real cap.
+fn cgroup_headroom_under(roots: &[String]) -> Option<f64> {
+    // "Unlimited" has three spellings in the wild: v2's literal `max`, and v1's numeric
+    // sentinels - u64::MAX, i64::MAX, and (most commonly) i64::MAX rounded down to a page
+    // multiple, 0x7FFF_FFFF_FFFF_F000. That last one sits just BELOW u64::MAX / 2, so a
+    // `< u64::MAX / 2` test lets it through and reports 9.2 exabytes of headroom, disabling
+    // the very check this exists for. Threshold on physical plausibility instead: no machine
+    // has 8 PiB of RAM, so anything this large is a sentinel, not a cap.
+    const IMPLAUSIBLE: u64 = 1 << 53; // 8 PiB
+
+    let num = |p: String| -> Option<u64> {
+        let s = fs::read_to_string(p).ok()?;
+        let s = s.trim();
+        if s == "max" {
+            return None;
+        }
+        let v = s.parse::<u64>().ok()?;
+        (v < IMPLAUSIBLE).then_some(v)
     };
-    for line in f.lines() {
-        if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            return rest.trim().parse::<f64>().unwrap_or(0.0) * 1024.0;
+
+    for base in roots {
+        // v2 first, then v1, since a v2 host may still carry a v1 compatibility tree.
+        for (lim, use_) in [
+            ("memory.max", "memory.current"),
+            ("memory.limit_in_bytes", "memory.usage_in_bytes"),
+        ] {
+            if let Some(max) = num(format!("{base}/{lim}")) {
+                let cur = num(format!("{base}/{use_}")).unwrap_or(0);
+                return Some(max.saturating_sub(cur) as f64);
+            }
         }
     }
-    let _ = &mut f;
-    0.0
+    None
 }
 
 // ----------------------------------------------------------------- presets ----
@@ -1401,16 +1470,20 @@ fn run() -> i32 {
         } else {
             0.0
         };
-        let need_b = w_trunk + w_model + w_cache + w_state + w_buf + w_kv;
+        // The tensor index is resident for the whole run and scales with the checkpoint,
+        // not the config: 497,220 tensors on the released weights. Leaving it out of the
+        // forecast is what let a run start 16 MiB short of its cap and get OOM-killed.
+        let w_index = st.index_bytes() as f64;
+        let need_b = w_trunk + w_model + w_cache + w_state + w_buf + w_kv + w_index;
         let have = mem_available_bytes();
         println!("\nmemory plan");
-        println!("  trunk {:<10} {}\n  embed + lm_head  {}\n  expert cache     {}\n  recurrent state  {}\n  buffers          {}\n  KV cache         {}\n  TOTAL            {}",
+        println!("  trunk {:<10} {}\n  embed + lm_head  {}\n  expert cache     {}\n  recurrent state  {}\n  buffers          {}\n  KV cache         {}\n  tensor index     {}\n  TOTAL            {}",
             if trunk_dir.is_some() { "(STREAMED)" } else { "(resident)" },
-            human(w_trunk), human(w_model), human(w_cache), human(w_state), human(w_buf), human(w_kv), human(need_b));
+            human(w_trunk), human(w_model), human(w_cache), human(w_state), human(w_buf), human(w_kv), human(w_index), human(need_b));
         if have > 0.0 {
             println!("  available        {}", human(have));
             if need_b > have * 0.95 {
-                eprintln!("\nREFUSING TO START: this needs {} and the machine has {} available, a shortfall of {}.\nOptions: a larger box, a smaller --cache-gb, or fewer --layers.",
+                eprintln!("\nREFUSING TO START: this needs {} and only {} is available, a shortfall of {}.\nIf a cgroup or container memory cap is in force, that cap is the limit here, not the host's free memory.\nOptions: a larger cap, a smaller --cache-gb or --trunk-gb, or fewer --layers.",
                     human(need_b), human(have), human(need_b - have));
                 return 1;
             }
@@ -2231,5 +2304,87 @@ mod tests {
         let before = now_s();
         std::thread::sleep(Duration::from_millis(1));
         assert!(now_s() > before);
+    }
+}
+
+#[cfg(test)]
+mod cgroup_tests {
+    use super::cgroup_headroom_under;
+
+    /// Writes a fake cgroup tree and returns its root.
+    fn tree(files: &[(&str, &str)]) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("k3cg-{}", std::process::id()));
+        let d = d.join(format!("{:p}", files));
+        std::fs::create_dir_all(&d).unwrap();
+        for (n, v) in files {
+            std::fs::write(d.join(n), v).unwrap();
+        }
+        d
+    }
+
+    fn under(d: &std::path::Path) -> Option<f64> {
+        cgroup_headroom_under(&[d.display().to_string()])
+    }
+
+    #[test]
+    fn v2_cap_reports_headroom_not_the_limit() {
+        // 8 GiB cap with 1 GiB already charged leaves 7 GiB, not 8.
+        let d = tree(&[
+            ("memory.max", "8589934592\n"),
+            ("memory.current", "1073741824\n"),
+        ]);
+        assert_eq!(under(&d), Some(7.0 * 1024.0 * 1024.0 * 1024.0));
+    }
+
+    #[test]
+    fn v2_literal_max_is_uncapped() {
+        // The whole point: `max` must not parse as a number, or an uncapped cgroup would
+        // report zero headroom and the engine would refuse to start on an idle machine.
+        let d = tree(&[("memory.max", "max\n"), ("memory.current", "1024\n")]);
+        assert_eq!(under(&d), None);
+    }
+
+    /// cgroup v1 spells "unlimited" as a huge number rather than a word, and it has three
+    /// spellings. The page-aligned one sits just below `u64::MAX / 2`, so the obvious
+    /// threshold lets it through and reports exabytes of headroom - which shipped here once,
+    /// and this case caught it. All three must read as uncapped.
+    #[test]
+    fn every_v1_unlimited_sentinel_is_uncapped() {
+        for sentinel in [
+            "9223372036854771712",  // i64::MAX rounded to a page multiple, the common one
+            "9223372036854775807",  // i64::MAX
+            "18446744073709551615", // u64::MAX
+        ] {
+            let d = tree(&[
+                ("memory.limit_in_bytes", sentinel),
+                ("memory.usage_in_bytes", "1024\n"),
+            ]);
+            assert_eq!(under(&d), None, "sentinel {sentinel} must read as uncapped");
+        }
+    }
+
+    #[test]
+    fn v1_real_limit_is_honoured() {
+        let d = tree(&[
+            ("memory.limit_in_bytes", "2147483648\n"),
+            ("memory.usage_in_bytes", "147483648\n"),
+        ]);
+        assert_eq!(under(&d), Some(2_000_000_000.0));
+    }
+
+    #[test]
+    fn usage_above_limit_saturates_to_zero_not_underflow() {
+        // Charged over the cap is possible transiently. Unsigned underflow here would report
+        // ~18 exabytes free, which is precisely the failure this guard exists to prevent.
+        let d = tree(&[("memory.max", "1024\n"), ("memory.current", "4096\n")]);
+        assert_eq!(under(&d), Some(0.0));
+    }
+
+    #[test]
+    fn missing_tree_is_uncapped() {
+        assert_eq!(
+            cgroup_headroom_under(&["/nonexistent/k3/cgroup".to_string()]),
+            None
+        );
     }
 }
