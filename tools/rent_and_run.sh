@@ -103,6 +103,10 @@ say "cloning both engines"
 cd "$MNT"
 [ -d kimi-k3-in-c ]    || git clone -q https://github.com/FareedKhan-dev/kimi-k3-in-c.git
 [ -d kimi-k3-in-rust ] || git clone -q https://github.com/undeemed/kimi-k3-in-rust.git
+# On a re-run the clone already exists, so PULL it: two reruns once executed a stale
+# guard because "skips what is done" silently included this checkout. The C clone is
+# not pulled - it is the frozen reference, pinned below.
+git -C kimi-k3-in-rust pull -q --ff-only 2>/dev/null || true
 git -C kimi-k3-in-c checkout -q "$C_COMMIT"
 echo "C at $(git -C kimi-k3-in-c rev-parse --short HEAD), Rust at $(git -C kimi-k3-in-rust rev-parse --short HEAD)"
 
