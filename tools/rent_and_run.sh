@@ -37,7 +37,11 @@ MNT=/data
 REPO=https://huggingface.co/moonshotai/Kimi-K3/resolve/main
 C_COMMIT=ff11dce858a2eb8a781224facdffd33a1fa48d25
 JOBS="${JOBS:-8}"            # parallel shard downloads
-NEED_GB=1750
+# Compared in BYTES. `df -BG` prints GiB despite the G, so comparing it against a figure
+# computed in decimal GB silently demands ~7% more space than intended: a 1,875 GB device
+# reports 1,711 and a 1750 threshold rejects it, which killed the first launch on a disk
+# with 168 GB to spare.
+NEED_BYTES=$((1670 * 1000 * 1000 * 1000))   # 1,561 GB checkpoint + 109 GB packed trunk
 
 say() { printf '\n=== %s ===\n' "$*"; }
 ncpu() { nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1; }
@@ -73,9 +77,9 @@ if ! mountpoint -q "$MNT"; then
     mkdir -p "$MNT"
     mount -o noatime "$DEV" "$MNT"
 fi
-avail_gb=$(df -BG --output=avail "$MNT" | tail -1 | tr -dc '0-9')
-echo "usable: ${avail_gb} GB (need ${NEED_GB} GB)"
-[ "$avail_gb" -ge "$NEED_GB" ] || { echo "NOT ENOUGH DISK, stopping before wasting hours" >&2; exit 1; }
+avail_bytes=$(df -B1 --output=avail "$MNT" | tail -1 | tr -dc '0-9')
+printf 'usable: %s GB, need %s GB\n' "$((avail_bytes/1000000000))" "$((NEED_BYTES/1000000000))"
+[ "$avail_bytes" -ge "$NEED_BYTES" ] || { echo "NOT ENOUGH DISK, stopping before wasting hours" >&2; exit 1; }
 chmod 777 "$MNT"
 
 # ---------------------------------------------------------------- deps ----
@@ -135,7 +139,7 @@ say "packing the trunk, ~109 GB, stdlib only"
 TRUNK="$MNT/k3trunk"
 mkdir -p "$TRUNK"
 [ -s "$TRUNK/trunk.bin" ] || python3 kimi-k3-in-c/tools/pack_trunk.py "$MODEL" "$TRUNK"
-df -BG --output=avail "$MNT" | tail -1 | xargs echo "disk left after packing:"
+printf 'disk left after packing: %s GB\n' "$(($(df -B1 --output=avail "$MNT" | tail -1 | tr -dc '0-9')/1000000000))"
 
 # ---------------------------------------------------------------- run ----
 # His 8 GB floor configuration, and the ceiling is enforced rather than hoped for.

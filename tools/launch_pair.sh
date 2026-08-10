@@ -21,6 +21,10 @@
 set -euo pipefail
 
 PROFILE="${PROFILE:?set PROFILE to an aws profile, e.g. PROFILE=myorg}"
+# Instance profile granting AmazonSSMManagedInstanceCore, so a box that fails is
+# reachable with `aws ssm start-session` instead of being a black box. Create once with
+# tools/make_ssm_profile.sh. Set SSM_PROFILE= to launch without it.
+SSM_PROFILE="${SSM_PROFILE-kimi-bench-ssm}"
 REGION="${REGION:-us-east-1}"
 TAG=kimi-k3-bench
 RUST_REPO="${RUST_REPO:-https://github.com/undeemed/kimi-k3-in-rust.git}"
@@ -54,7 +58,7 @@ quota_for() {
 userdata() {  # runs as root on first boot, no SSH needed
     cat <<EOF
 #!/usr/bin/env bash
-exec > >(tee -a /var/log/kimi-bench.log) 2>&1
+exec > >(tee -a /var/log/kimi-bench.log | tee /dev/console) 2>&1
 set -x
 
 # Guaranteed end, whatever happens. Without this a box that fails early, or wedges on a
@@ -67,7 +71,18 @@ shutdown -h +480 "kimi-bench backstop" &
 # keeps its root volume and its console log, so /tmp/result.csv and the full log are still
 # readable afterwards, and it bills only ~40 GB of gp3. Terminating would have destroyed
 # the very output this run exists to produce.
-trap 'echo "EXIT status \$? - stopping instance"; shutdown -h now' EXIT
+on_exit() {
+  rc=\$?
+  echo "EXIT status \$rc"
+  if [ "\$rc" -ne 0 ]; then
+    echo "FAILED. Holding 20 minutes so a session can attach, then stopping."
+    echo "  aws ssm start-session --target \$(cloud-init query instance_id 2>/dev/null || echo INSTANCE)"
+    echo "  then: cat /var/log/kimi-bench.log"
+    sleep 1200
+  fi
+  shutdown -h now
+}
+trap on_exit EXIT
 
 apt-get update -qq && apt-get install -y -qq git curl
 cd /root
@@ -110,6 +125,7 @@ launch)
             --image-id "$(ami_for "$arch")" \
             --instance-type "$(inst_for "$arch")" \
             --instance-initiated-shutdown-behavior stop \
+            ${SSM_PROFILE:+--iam-instance-profile Name=$SSM_PROFILE} \
             --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=40,VolumeType=gp3,DeleteOnTermination=true}' \
             --user-data "$(userdata)" \
             --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$TAG-$arch},{Key=Project,Value=$TAG}]" \
