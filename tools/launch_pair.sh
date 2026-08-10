@@ -75,7 +75,7 @@ set -x
 # download, and modelling the runs off the reference's own 57.3% I/O split puts the whole
 # job at 2.3-2.8 h. But a backstop that fires mid-run stops the instance, and stopping
 # discards the instance store, so the 1.56 TB has to be pulled again: ~2 h lost against
-# ~$6 of idle billing for the extra headroom. The run stops itself when it finishes, so
+# ~\$6 of idle billing for the extra headroom. The run stops itself when it finishes, so
 # this only ever fires on a hang.
 shutdown -h +720 "kimi-bench backstop" &
 
@@ -154,7 +154,8 @@ launch)
     done
     echo
     echo "Each box downloads 1.56 TB then runs. Budget 4-6 hours."
-    echo "Each STOPS itself when done, or after 8 hours whatever happens. A stopped box"
+    echo "Each STOPS itself when done, or after 12 hours whatever happens. On FAILURE it"
+    echo "stays UP so the downloaded checkpoint survives for a retry. A stopped box"
     echo "keeps /tmp/result.csv and its console log and bills only its 40 GB root volume."
     echo "Poll with:  PROFILE=$PROFILE bash tools/launch_pair.sh status"
     echo "Clean up:   PROFILE=$PROFILE bash tools/launch_pair.sh kill"
@@ -193,5 +194,10 @@ kill)
     echo "terminating: $ids"
     "${A[@]}" ec2 terminate-instances --instance-ids $ids --query 'TerminatingInstances[].InstanceId' --output text
     ;;
-*)  echo "usage: $0 {check|launch [arm64|x86_64]|status|kill}" >&2; exit 2 ;;
+userdata)  # print the boot script for an arch without launching anything.
+    # Exists because a $-expansion bug in this heredoc once emptied the userdata and a box
+    # booted to do nothing; this makes that checkable before money moves.
+    userdata "${2:-arm64}" ;;
+
+*)  echo "usage: $0 {check|launch [arm64|x86_64]|status|kill|userdata [arch]}" >&2; exit 2 ;;
 esac
