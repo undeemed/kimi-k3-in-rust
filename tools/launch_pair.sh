@@ -33,7 +33,14 @@ A=(aws --profile "$PROFILE" --region "$REGION")
 # im4gn is Graviton2, so the arm64 box is where the NEON kernels actually get tested.
 # Plain case statements rather than associative arrays: macOS still ships bash 3.2, which
 # has no `declare -A`, and this half runs on the laptop.
-inst_for()     { case "$1" in arm64) echo im4gn.xlarge ;; x86_64) echo i3en.xlarge ;; esac; }
+# Core count is a measurement decision, not just a cost one. The reference measured on 124
+# cores where ~80% of a token is disk wait. On 4 cores the compute half inflates while the
+# disk half does not, so the run turns compute-bound and reports something near the raw
+# kernel ratio rather than what a deployment sees. Since the Rust advantage lives entirely
+# in compute, a small box overstates it. Default to the largest that fits a 16 vCPU quota.
+ARM_TYPE="${ARM_TYPE:-im4gn.4xlarge}"     # 16 vCPU, 64 GiB, 7.5 TB
+X86_TYPE="${X86_TYPE:-i3en.3xlarge}"      # 12 vCPU, 96 GiB, 7.5 TB
+inst_for()     { case "$1" in arm64) echo "$ARM_TYPE" ;; x86_64) echo "$X86_TYPE" ;; esac; }
 ami_suffix()   { case "$1" in arm64) echo arm64 ;; x86_64) echo amd64 ;; esac; }
 
 say() { printf '\n=== %s ===\n' "$*"; }
