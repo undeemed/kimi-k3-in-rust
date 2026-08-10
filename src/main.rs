@@ -128,6 +128,22 @@ fn mem_available_bytes() -> f64 {
     }
 }
 
+/// This process's current resident set, from `/proc/self/status` VmRSS. Zero where that
+/// does not exist (macOS), which is also where the availability check is skipped anyway.
+/// Used to undo a double count: the plan's TOTAL includes what is already resident, while
+/// MemAvailable and cgroup headroom both exclude it.
+fn own_rss_bytes() -> f64 {
+    fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines().find_map(|l| {
+                l.strip_prefix("VmRSS:")
+                    .and_then(|r| r.split_whitespace().next()?.parse::<f64>().ok())
+            })
+        })
+        .map_or(0.0, |kb| kb * 1024.0)
+}
+
 /// Remaining headroom in this process's memory cgroup, or `None` when uncapped.
 ///
 /// Handles cgroup v2 (`memory.max`, `memory.current`) and v1 (`memory.limit_in_bytes`,
@@ -1495,10 +1511,28 @@ fn run() -> i32 {
             return 0;
         }
         if have > 0.0 {
-            println!("  available        {}", human(have));
-            if need_b > have * 0.95 {
-                eprintln!("\nREFUSING TO START: this needs {} and only {} is available, a shortfall of {}.\nIf a cgroup or container memory cap is in force, that cap is the limit here, not the host's free memory.\nOptions: a larger cap, a smaller --cache-gb or --trunk-gb, or fewer --layers.",
-                    human(need_b), human(have), human(need_b - have));
+            // `need_b` is the TOTAL the process will hold; `have` is what it may STILL
+            // take. By plan time the index (and the binary, and the header page cache) are
+            // already built and already charged against `have`, so comparing the two raw
+            // double-counts everything currently resident: counted in the need, missing
+            // from the available. Add our own current footprint back. On the released
+            // checkpoint that asymmetry is ~200 MB, and it refused a run on a box where the
+            // C build had just completed under the same cap.
+            let usable = have + own_rss_bytes();
+            // Absolute margin, not a percentage. The forecast matched the observed peak of
+            // the OOM-killed 93-layer run to 13 MB, so 128 MB is ~10x the demonstrated
+            // error; a 5% slack at this scale is 430 MB and refuses runs that measurably
+            // fit. A wrong refusal and a mid-run kill now cost the same thing - a re-run -
+            // so the guard should be tight rather than timid.
+            const MARGIN: f64 = 128.0 * 1024.0 * 1024.0;
+            println!(
+                "  available        {}  (+ {} already resident)",
+                human(have),
+                human(own_rss_bytes())
+            );
+            if need_b + MARGIN > usable {
+                eprintln!("\nREFUSING TO START: this needs {} (+ {} margin) and only {} is usable.\nIf a cgroup or container memory cap is in force, that cap is the limit here, not the host's free memory.\nOptions: a larger cap, a smaller --cache-gb or --trunk-gb, or fewer --layers.",
+                    human(need_b), human(MARGIN), human(usable));
                 return 1;
             }
         }
