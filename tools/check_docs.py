@@ -77,6 +77,13 @@ def main() -> int:
         f"README has {len(blocks)}, TABLES has {len(TABLES)}",
     )
 
+    # The full-model result: the README's C/Rust/speedup figures must match the CSV.
+    fm = open("docs/data/full-model.csv").readlines()[1].strip().split(",")
+    c_s, r_s, sp = float(fm[4]), float(fm[5]), float(fm[6])
+    want = [f"C         {c_s:.2f}", f"Rust      {r_s:.2f}", f"speedup: {sp:.2f}x"]
+    missing = [w for w in want if w not in text]
+    check(not missing, "full-model table matches full-model.csv", ", ".join(missing))
+
     for i, (label, path, col) in enumerate(TABLES):
         if i >= len(blocks):
             check(False, label, "table missing from README")

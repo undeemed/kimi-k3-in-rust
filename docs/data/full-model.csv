@@ -1,0 +1,2 @@
+arch,vcpu,layers,cap_gib,c_s_per_token,rust_s_per_token,speedup,c_peak_gb,rust_peak_gb,c_io_share,rust_io_share,tokens_match,logits
+aarch64,16,93,8,74.4631,72.4722,1.0275,8.28,8.34,0.780,0.828,yes,identical

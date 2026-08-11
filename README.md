@@ -14,7 +14,7 @@ Same 8 GB memory floor as the C original.</p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License"></a>
 <a href="Cargo.toml"><img src="https://img.shields.io/badge/Rust-1.83+-orange?style=flat-square" alt="Rust"></a>
 <a href="#platforms"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20x86--64%20%7C%20arm64-lightgrey?style=flat-square" alt="Platform"></a>
-<a href="#tests"><img src="https://img.shields.io/badge/tests-48%20passed-brightgreen?style=flat-square" alt="Tests"></a>
+<a href="#tests"><img src="https://img.shields.io/badge/tests-55%20passed-brightgreen?style=flat-square" alt="Tests"></a>
 <a href="#1-byte-identical-logits"><img src="https://img.shields.io/badge/logits%20vs%20C-byte--identical-success?style=flat-square" alt="Bit identity"></a>
 </p>
 
@@ -70,10 +70,11 @@ It uses no BLAS, framework, or GPU.
 
 **Current proof:**
 
-- 48 tests pass, including the two that need the released checkpoint.
+- 55 tests pass, including the two that need the released checkpoint.
 - Tiny-model logits are byte-identical to the C build on the same machine.
 - **Released-checkpoint logits are byte-identical too**: all 163,840, on real weights.
 - On real weights this port decodes 1.54x to 1.62x faster per token than the C build, on aarch64; expect parity on x86-64.
+- **The full 93 layers ran on both engines at the same 8 GiB cap**: tokens equal, logits byte-identical, Rust 1.03x - a full-model token is ~80% disk wait, so the kernel gap mostly vanishes.
 - CI checks Linux x86-64, macOS arm64, Clippy, formatting, and C-to-Rust bit identity.
 
 > **Want the whole 93 layers?** That needs the full checkpoint on disk, 1,561 GB plus a
@@ -149,7 +150,18 @@ including inside the collapsed blocks.
    `shape[4]`, one FNV-keyed table, names stored once.
    [How it was measured without renting anything](#reproducing-the-oom-on-a-laptop).
 
-12,709 lines of Rust, four dependencies, a 1.16 MB binary.
+9. **It kept dying anyway, and the real bug was better.** The index fix was necessary but
+   not sufficient: a 12 GiB diagnostic run measured true anonymous demand at 10.70 GB
+   against an 8.47 GB plan, and an `mmap` trace with stacks caught the port loading the
+   2.35 GB embedding **twice** - once for the model, once for a `--draft` mode that was
+   not even enabled. C aliases that buffer inside the draft branch (`dw.mb = w.mb`,
+   k3_run.c:1135); the port had hoisted it out and made it a copy. One `Arc` later, all
+   93 layers run at the same 8 GiB cap as C: **74.46 s/token C, 72.47 Rust, tokens equal,
+   all 163,840 logits byte-identical.** The speedup is 1.03x and the honest reason is
+   that a full-model token on this box is ~80% disk wait; the kernel gap only shows where
+   compute matters. [The full result](#reproducing-the-oom-on-a-laptop).
+
+14,430 lines of Rust (blanks and comments excluded), four dependencies, a 1.16 MB binary.
 
 ## Running it
 
@@ -526,7 +538,8 @@ with that number and should never be dropped from it: it is an **aarch64** resul
 it comes from a kernel the original left to the autovectoriser and this port hand-wrote
 (on x86-64 both hand-write intrinsics and the instruction mix is identical, so expect
 parity), and it is **two layers of 93**, so it does not project onto a full token, where
-storage dominates. On a synthetic f32-only model the same harness measures only 1.14x to
+storage dominates - [the full 93-layer measurement](#reproducing-the-oom-on-a-laptop) came
+in at **1.03x** with byte-identical logits, both engines inside the same 8 GiB cap. On a synthetic f32-only model the same harness measures only 1.14x to
 1.38x, and that gap is itself a finding - see
 [why the synthetic number was low](#why-the-synthetic-number-was-low).
 
@@ -605,11 +618,73 @@ behind an open-addressed FNV table (`k3_st.c:64`), with an inline `int64_t shape
 three - inline `[i64; 4]`, one `fnv1a`-keyed table with hits confirmed against the stored
 name, `Box<str>` - which is both smaller and closer to the original.
 
-**The full-model speed comparison is therefore still open.** The number that stands is the
-two-layer one above. Re-running the full stack means another 1.56 TB pull;
-[`tools/rent_and_run.sh`](tools/rent_and_run.sh) does it end to end, and now leaves the box
-up on failure rather than stopping, because stopping discards the instance store and turns
-any late failure into another 2.5-hour download. That is how this run was lost.
+**The full model then ran, and the result is the strongest in this README.** After the
+index fix, one more OOM at the same cap forced the real hunt: a 12G diagnostic run
+measured true anonymous demand at 10.70 GB against an 8.47 GB plan, a `/proc/PID/maps`
+snapshot showed one unplanned 2.35 GB block sized exactly vocab × hidden × bf16, and a
+`bpftrace` trace on `mmap` with user stacks caught `ModelBind::load` running **twice** -
+the second time for the hybrid-draft path, which C only ever aliases
+(`k3_run.c:1135: dw.mb = w.mb`) and only inside the `--draft` branch. The port had turned
+a conditional alias into an unconditional second copy of the embedding. `Weights.mb` is
+now `Arc<ModelBind>` and the draft clones the Arc.
+
+With that gone, all 93 layers fit and ran at the same `MemoryMax=8G` the C build uses:
+
+```text
+93 layers, 1.56 TB checkpoint, 8 GiB cap, im4gn.4xlarge (16 vCPU Graviton2)
+
+          s/token   peak RSS   I/O share of wall clock
+C         74.46     8.28 GB    78.0%
+Rust      72.47     8.34 GB    82.8%
+
+tokens: identical    logits: byte-identical    speedup: 1.03x
+```
+
+([`docs/data/full-model.csv`](docs/data/full-model.csv))
+
+Three things this measures, in order of importance:
+
+1. **The exactness contract holds at full scale.** All 163,840 final logits byte-identical
+   and every generated token id equal, through 93 layers, 870 GB of streamed trunk reads,
+   and 16,223 expert loads. The tiny-model byte-identity was the design gate; this is the
+   same property on the real 2.78T-parameter artifact.
+2. **The 8 GB claim now holds for the port** - 8.34 GB peak against C's 8.28, the ~60 MB
+   difference being the larger tensor index. It took three real bugs to get here (the
+   index memory, a guard comparing against the wrong limit, the draft double-load), each
+   documented above and in the commit history.
+3. **The speedup is 1.03x, and quoting anything else would be dishonest.** A full-model
+   token on this box is ~80% disk wait - 870 GB of trunk plus 25.8 GB of experts read per
+   8 tokens - and both engines read identical bytes at identical speed. The kernel
+   advantage that gives 1.54-1.62x on the two-layer stack (40-60% I/O) dilutes to almost
+   nothing when the disk is the bottleneck, exactly as the Amdahl paragraph below
+   predicts. Faster storage widens the gap; this disk closes it.
+
+**Why 1.03x is signal and not noise.** Three independent checks:
+
+- The saga's failures left behind five C full-model runs on this instance type; the port
+  ran twice, once at the 8 GiB cap and once at a 12 GiB diagnostic cap.
+
+  ```text
+  C    74.46  74.48  74.49  74.51  74.54    spread 0.08 s  =  0.11%
+  Rust 72.47  72.48                         spread 0.01 s
+  gap   2.02 s/token  =  2.71%   ->   25x the C spread
+  ```
+
+  The spread is tiny because the workload is structurally deterministic: trunk reads use
+  O_DIRECT, so no page-cache state carries between runs - every run reads the same
+  870.5 GB in the same fixed layer order at the same ~2390 MB/s.
+- The gap sits exactly where the code differs. By each run's own accounting the I/O
+  halves are near-equal (C 465.0 s, Rust 480.3 s - same bytes, same disk) and the entire
+  2-second gap is the compute half: C 130.7 s against Rust 99.5 s, a 1.31x kernel-side
+  ratio diluted to 1.03x by the disk. Noise would scatter across both halves; this
+  difference is concentrated in the only half where the two implementations diverge.
+- The logits are byte-identical, so the two timings measure exactly the same arithmetic
+  on the same inputs. There is no workload variance for a timing artifact to hide in.
+
+[`tools/rent_and_run.sh`](tools/rent_and_run.sh) reproduces the whole measurement end to
+end on a rented box, and leaves the box up on failure so the 1.56 TB checkpoint survives
+for a retry - stopping used to discard the instance store, which turned any late failure
+into another 2.5-hour download.
 
 <a id="why-the-synthetic-number-was-low"></a>
 #### Why the synthetic number was low
@@ -676,8 +751,12 @@ I/O share of a real token    1.62x arithmetic    1.54x arithmetic
 ```
 
 So the defensible claim: **the port does not pay for its safety on the hot path, and is
-about 1.6x ahead of the C build on real weights at these widths.** Across a whole 93-layer
-token that would land nearer 1.16-1.29x, and the disk would still be the thing to fix first.
+about 1.6x ahead of the C build on real weights at these widths.** The projection above
+said a whole 93-layer token would land nearer 1.16-1.29x; [the measurement
+came in at 1.03x](#reproducing-the-oom-on-a-laptop), because this box spends 78-83% of a
+full-model token in storage waits - above even the ladder's 60.6% top rung - and the
+compute half's measured 1.31x dilutes accordingly. The projection's structure was right,
+its I/O share was optimistic, and the disk is still the thing to fix first.
 
 Peak RSS is at parity - 2.02 GB against 2.01 GB on this model, measured the same run.
 
