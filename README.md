@@ -654,7 +654,7 @@ Three things this measures, in order of importance:
    documented above and in the commit history.
 3. **The speedup is 1.03x, and quoting anything else would be dishonest.** A full-model
    token on this box is ~80% disk wait - 870 GB of trunk plus 25.8 GB of experts read per
-   8 tokens - and both engines read identical bytes at identical speed. The kernel
+   8 tokens - and both engines read the same bytes at nearly the same rate. The kernel
    advantage that gives 1.54-1.62x on the two-layer stack (40-60% I/O) dilutes to almost
    nothing when the disk is the bottleneck, exactly as the Amdahl paragraph below
    predicts. Faster storage widens the gap; this disk closes it.
@@ -673,11 +673,15 @@ Three things this measures, in order of importance:
   The spread is tiny because the workload is structurally deterministic: trunk reads use
   O_DIRECT, so no page-cache state carries between runs - every run reads the same
   870.5 GB in the same fixed layer order at the same ~2390 MB/s.
-- The gap sits exactly where the code differs. By each run's own accounting the I/O
-  halves are near-equal (C 465.0 s, Rust 480.3 s - same bytes, same disk) and the entire
-  2-second gap is the compute half: C 130.7 s against Rust 99.5 s, a 1.31x kernel-side
-  ratio diluted to 1.03x by the disk. Noise would scatter across both halves; this
-  difference is concentrated in the only half where the two implementations diverge.
+- The decomposition points the same way, but it has two terms and quoting only one would
+  overstate it. By each run's own accounting, per 8 tokens: compute is C 130.7 s against
+  Rust 99.5 s, **31.2 s in the port's favour (1.31x)** - the two-layer kernel advantage
+  showing up again. I/O wall is C 465.0 s against Rust 480.3 s, **15.3 s the other way**
+  on the same bytes (the port's trunk reads attribute at 2358 MB/s to C's 2392). Net:
+  15.9 s, the 2.02 s/token measured. Two caveats travel with this split: each engine
+  draws its own I/O-versus-compute boundary, so the attribution is self-reported, and it
+  comes from one run pair. The 1.03x headline rests on the whole-token clocks above,
+  which need neither caveat.
 - The logits are byte-identical, so the two timings measure exactly the same arithmetic
   on the same inputs. There is no workload variance for a timing artifact to hide in.
 
