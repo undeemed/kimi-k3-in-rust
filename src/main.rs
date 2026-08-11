@@ -810,7 +810,11 @@ struct Weights {
     /// `n_bound` layer bindings. When the trunk is streamed these stay empty and are
     /// filled per-step from `trunk`; when resident they hold the whole layer.
     lay: Vec<LayerBind>,
-    mb: ModelBind,
+    /// Shared with the draft `Weights` when a hybrid draft trunk is in use, because the
+    /// draft uses the same embedding and lm_head (k3_run.c:1135: `dw.mb = w.mb`). An Arc
+    /// rather than a second load: embed alone is 2.35 GB, and loading it again for a
+    /// draft that is usually absent is what pushed the full model over its 8 GiB cap.
+    mb: std::sync::Arc<ModelBind>,
     n_bound: usize,
     trunk: Option<Trunk>,
     /// Incremental decode state. Only MLA layers need a KV cache, so the 24 of them are
@@ -1556,10 +1560,10 @@ fn run() -> i32 {
 
     let mut w = Weights {
         lay: Vec::new(),
-        mb: ModelBind::load(&st, &c, true).unwrap_or_else(|e| {
+        mb: std::sync::Arc::new(ModelBind::load(&st, &c, true).unwrap_or_else(|e| {
             eprintln!("bind_model failed: {e}");
             std::process::exit(1);
-        }),
+        })),
         n_bound: nl,
         trunk: None,
         kvc: None,
@@ -1777,10 +1781,11 @@ fn run() -> i32 {
     // is exactly the exact model's greedy decode by construction.
     let mut dw = Weights {
         lay: Vec::new(),
-        mb: ModelBind::load(&st, &c, false).unwrap_or_else(|e| {
-            eprintln!("draft bind_model failed: {e}");
-            std::process::exit(1);
-        }),
+        // The draft shares the exact model's embedding and lm_head, k3_run.c:1135. The
+        // port used to LOAD a second embedding here - 2.35 GB, unconditionally, --draft
+        // or not - which is the allocation that made the 93-layer run exceed an 8 GiB
+        // cap that the C build fits inside.
+        mb: std::sync::Arc::clone(&w.mb),
         n_bound: nl,
         trunk: None,
         kvc: None,
