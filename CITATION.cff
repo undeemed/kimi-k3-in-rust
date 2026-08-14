@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "kimi-k3-in-rust: CPU inference for Kimi K3 in pure Rust"
+type: software
+authors:
+  - name: undeemed
+repository-code: "https://github.com/undeemed/kimi-k3-in-rust"
+license: Apache-2.0
+abstract: >-
+  CPU inference for Kimi K3, a 2.78 trillion parameter mixture-of-experts
+  LLM, in pure Rust. No GPU, BLAS, PyTorch, or ONNX. Streams the checkpoint
+  from disk with an 8 GB memory floor. A byte-identical port of
+  kimi-k3-in-c.
+keywords:
+  - kimi-k3
+  - rust
+  - llm-inference
+  - cpu-inference
+  - mixture-of-experts
+  - mxfp4
+  - simd
+references:
+  - type: software
+    title: kimi-k3-in-c
+    authors:
+      - name: FareedKhan-dev
+    repository-code: "https://github.com/FareedKhan-dev/kimi-k3-in-c"

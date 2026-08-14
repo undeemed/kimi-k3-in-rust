@@ -4,7 +4,7 @@
 
 <h3>A Rust port of <a href="https://github.com/FareedKhan-dev/kimi-k3-in-c">kimi-k3-in-c</a></h3>
 
-<p><b>CPU inference for a 2.78 trillion parameter mixture-of-experts LLM, in pure Rust.</b><br>
+<p><b>CPU inference for Kimi K3, a 2.78 trillion parameter mixture-of-experts LLM, in pure Rust.</b><br>
 No GPU, BLAS, PyTorch, or ONNX.
 Four dependencies.
 Same 8 GB memory floor as the C original.</p>
@@ -928,6 +928,48 @@ the unicode tables formatted one entry per line. None of it is abstraction.
 
 [`docs/images/`](docs/images/) contains the figures and their Python or Mermaid generators.
 Its README separates measurements made here from figures inherited from the original.
+
+## FAQ
+
+### Does it need a GPU?
+
+No.
+Inference runs entirely on the CPU, with hand-written AVX2 (x86-64) and NEON (arm64) kernels and a portable fallback.
+There is no CUDA, BLAS, PyTorch, or ONNX anywhere in the build.
+
+### How much memory does it need?
+
+8 GB of RAM.
+The full 93-layer run [completed inside an 8 GiB `MemoryMax` cap](#reproducing-the-oom-on-a-laptop), the same ceiling the C original is built around.
+The full checkpoint needs about 1.56 TB of disk, which is a storage bill rather than a memory one.
+
+### Is the output identical to the C version?
+
+Yes, byte-identical.
+All 163,840 final logits from the released checkpoint match the C build exactly, as do the tiny-model logits.
+See [How we know it is the same engine](#how-we-know-it-is-the-same-engine).
+
+### Is it faster than C?
+
+On arm64, tokens decode 1.54x to 1.62x faster on real weights at two layers; the full 93-layer model measured 1.03x, because storage dominates a full token.
+On x86-64 expect parity, since both projects hand-write their intrinsics.
+See [C against Rust, measured](#c-against-rust-measured) for the scope limits that travel with those numbers.
+
+### Does it run on Windows?
+
+It compiles and runs through the buffered I/O path.
+Linux (`O_DIRECT`) and macOS (`F_NOCACHE`) are the measured platforms.
+
+### Where do I get the Kimi K3 model weights?
+
+Not here.
+Kimi K3 is released by Moonshot AI under its own license, and this repository contains no weights.
+`scripts/download-model.sh` in the [C original](https://github.com/FareedKhan-dev/kimi-k3-in-c) fetches the checkpoint.
+
+### How is this different from kimi-k3-in-c?
+
+It is a statement-for-statement port: same CLI, same tests, same output bytes.
+The ten implementation differences are listed in [What is different](#what-is-different).
 
 ## License and attribution
 
